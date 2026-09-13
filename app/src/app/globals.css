@@ -1,0 +1,532 @@
+:root {
+  --color-bg: #f5f6fb;
+  --color-surface: #ffffff;
+  --color-surface-muted: #fafafc;
+  --color-border: #e3e5ee;
+  --color-text: #1a1d29;
+  --color-text-muted: #666e80;
+  --color-primary: #1a6fbf;
+  --color-primary-hover: #14588f;
+  --color-primary-soft: #e3f0fb;
+  --color-ink: #141414;
+  --color-success: #0f7a3d;
+  --color-success-soft: #e5f6ec;
+  --color-warning: #a1590a;
+  --color-warning-soft: #fdf1e2;
+  --color-danger: #b42318;
+  --color-danger-soft: #fdedec;
+  --color-info: #0369a1;
+  --color-info-soft: #e8f4fb;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-md: 0 8px 24px rgba(16, 24, 40, 0.08);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #0d0f16;
+    --color-surface: #161923;
+    --color-surface-muted: #1c202c;
+    --color-border: #2a2e3d;
+    --color-text: #e7e9f2;
+    --color-text-muted: #99a0b3;
+    --color-primary: #5aa9e6;
+    --color-primary-hover: #7fbdf0;
+    --color-primary-soft: #142a3a;
+    --color-ink: #050505;
+    --color-success: #4ade80;
+    --color-success-soft: #12301f;
+    --color-warning: #fbbf24;
+    --color-warning-soft: #392a0c;
+    --color-danger: #f87171;
+    --color-danger-soft: #3a1616;
+    --color-info: #38bdf8;
+    --color-info-soft: #0d2836;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  padding: 0;
+  margin: 0;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif);
+  -webkit-font-smoothing: antialiased;
+  line-height: 1.5;
+}
+
+a {
+  color: var(--color-primary);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+h1,
+h2,
+h3 {
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+}
+h1 {
+  font-size: 1.5rem;
+  margin: 0 0 0.25rem;
+}
+h2 {
+  font-size: 1.125rem;
+  margin: 1.75rem 0 0.75rem;
+}
+
+p {
+  margin: 0.5rem 0;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: var(--color-surface-muted);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 0.1rem 0.35rem;
+  font-size: 0.85em;
+}
+
+/* Layout */
+/* ⚠️ 2026.08.14-i kiegészítés: a korábbi 1040px kemény korlát nagy
+   (~40 cm+) monitoron is jóval keskenyebb dobozba szorította a széles
+   táblázatokat (Kontír/áfa szabályok, számla tételsorok), mint amennyi
+   szabad hely ténylegesen rendelkezésre állt — ez volt a könyvelő által
+   jelzett "nem jó a frame kialakítása" jelenség egyik oka (a másik a
+   soronként egyszerre szerkeszthető mezők száma volt, ld. RulesEditor.tsx/
+   InvoiceDetail.tsx lista/szerkesztés szétválasztása). */
+.container {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 4rem;
+}
+.container-narrow {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 4rem;
+}
+/* ⚠️ 2026.08.12-i pontosítás: a korábbi .table-wrap min-width:0 fix
+   ÖNMAGÁBAN nem volt elég — a .table-wrap egy .stack-lg-n BELÜL van (pl.
+   RulesEditor saját gyökere), ami MAGA IS flex gyerek a lapszintű
+   .stack-lg-ben. Flex gyerekek alapértelmezett min-width:auto miatt EGY
+   köztes .stack/.stack-lg/.cluster is megakadályozhatja, hogy az overflow
+   valaha eljusson a .table-wrap-ig — helyette az egész oldal szélesedik
+   ahelyett, hogy a táblázat gördülne. A min-width:0 minden flex-konténer
+   szinten kell, nem csak a legbelsőn. */
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  min-width: 0;
+}
+.stack-lg {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  min-width: 0;
+}
+.cluster {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+/* Top bar shell */
+.topbar {
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+.topbar-inner {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 0.9rem 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-weight: 700;
+  font-size: 1.05rem;
+  color: var(--color-text);
+}
+.brand:hover {
+  text-decoration: none;
+}
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--color-ink);
+  border: 1px solid var(--color-border);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+.topbar-user {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+}
+
+/* Breadcrumb / back link */
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  margin-bottom: 0.75rem;
+}
+.back-link:hover {
+  color: var(--color-primary);
+}
+
+.page-header {
+  margin-bottom: 1.25rem;
+}
+.page-header .eyebrow {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  font-weight: 600;
+  margin-bottom: 0.15rem;
+}
+
+/* Tabs / secondary nav */
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 1rem 0 1.5rem;
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: 0.6rem;
+}
+.tabs a {
+  color: var(--color-text-muted);
+  font-size: 0.88rem;
+  font-weight: 550;
+  padding: 0.35rem 0.7rem;
+  border-radius: 999px;
+}
+.tabs a:hover {
+  background: var(--color-surface-muted);
+  text-decoration: none;
+  color: var(--color-text);
+}
+.tabs a.active {
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+}
+
+/* Cards */
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 1.25rem 1.4rem;
+  box-shadow: var(--shadow-sm);
+}
+.card + .card {
+  margin-top: 1rem;
+}
+.card-title {
+  font-weight: 650;
+  margin-bottom: 0.25rem;
+}
+.card-muted {
+  background: var(--color-surface-muted);
+}
+
+/* Buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 0.88rem;
+  font-weight: 600;
+  padding: 0.5rem 0.9rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+}
+.btn:hover:not(:disabled) {
+  background: var(--color-surface-muted);
+  text-decoration: none;
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+/* `<button disabled>`-hez hasonló megjelenés `<a>` (pl. Next.js Link) elemekhez,
+   ahol a natív `disabled` attribútum nem elérhető — ld. lapozás gombok. */
+.btn-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.btn-primary {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #fff;
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+  border-color: var(--color-primary-hover);
+}
+.btn-danger {
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+}
+.btn-danger:hover:not(:disabled) {
+  background: var(--color-danger-soft);
+}
+.btn-sm {
+  padding: 0.3rem 0.6rem;
+  font-size: 0.8rem;
+}
+
+/* Forms */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+.field-hint {
+  font-size: 0.78rem;
+  font-weight: 400;
+  color: var(--color-text-muted);
+}
+input[type="text"],
+input[type="email"],
+input[type="password"],
+input[type="file"],
+select,
+textarea {
+  font: inherit;
+  font-weight: 400;
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.6rem;
+}
+input[type="text"]:focus,
+input[type="email"]:focus,
+input[type="password"]:focus,
+select:focus,
+textarea:focus {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+input[type="checkbox"] {
+  accent-color: var(--color-primary);
+  width: 15px;
+  height: 15px;
+}
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+@media (max-width: 640px) {
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Tables */
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  /* A `.stack`/`.stack-lg` flex szülőben a flex gyerek alapértelmezett
+     min-width:auto miatt NEM zsugorodik a saját overflow-x:auto-ja alá —
+     helyette az egész oldalt tolja szélesebbre, és a tényleges gördítés
+     nem működik (ld. 2026.08.12-i visszajelzés, sok oszlopos Kontír/áfa
+     szabályok táblázat). A min-width:0 engedi, hogy a doboz a szülő
+     szélességére zsugorodjon, és a gördítősáv ténylegesen a táblázaton
+     belül jelenjen meg. */
+  min-width: 0;
+}
+table.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+table.table th {
+  text-align: left;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-text-muted);
+  font-weight: 650;
+  padding: 0.65rem 0.85rem;
+  background: var(--color-surface-muted);
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+table.table td {
+  padding: 0.6rem 0.85rem;
+  border-bottom: 1px solid var(--color-border);
+  vertical-align: middle;
+}
+table.table tbody tr:last-child td {
+  border-bottom: none;
+}
+table.table tbody tr:hover {
+  background: var(--color-surface-muted);
+}
+table.table td input[type="text"] {
+  width: 100%;
+  min-width: 90px;
+}
+
+/* Badges */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.75rem;
+  font-weight: 650;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.badge-neutral {
+  background: var(--color-surface-muted);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+}
+.badge-primary {
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+}
+.badge-success {
+  background: var(--color-success-soft);
+  color: var(--color-success);
+}
+.badge-warning {
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+}
+.badge-danger {
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+}
+.badge-info {
+  background: var(--color-info-soft);
+  color: var(--color-info);
+}
+
+/* Alerts / inline messages */
+.alert {
+  border-radius: var(--radius-sm);
+  padding: 0.6rem 0.85rem;
+  font-size: 0.85rem;
+  border: 1px solid transparent;
+}
+.alert-error {
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+  border-color: color-mix(in srgb, var(--color-danger) 25%, transparent);
+}
+.alert-success {
+  background: var(--color-success-soft);
+  color: var(--color-success);
+  border-color: color-mix(in srgb, var(--color-success) 25%, transparent);
+}
+.alert-warning {
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+  border-color: color-mix(in srgb, var(--color-warning) 25%, transparent);
+}
+
+.muted {
+  color: var(--color-text-muted);
+}
+.text-sm {
+  font-size: 0.85rem;
+}
+
+/* Kis, szín-öröklő folyamatjelző hosszabb (szinkron/tanulás/összevonás)
+   műveletek gombjaihoz — ld. docs/tervezes.md 10. fejezet, 2026.08.12-i
+   kiegészítés. */
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.spinner {
+  display: inline-block;
+  width: 0.85em;
+  height: 0.85em;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+  opacity: 0.7;
+  vertical-align: -0.15em;
+}
+
+/* Szerkesztő modal (pl. szabály/tételsor szerkesztése) — ld.
+   docs/tervezes.md 10. fejezet, 2026.08.14-i kiegészítés: a korábbi,
+   minden sorban egyszerre szerkeszthető, sok oszlopos táblázat helyett a
+   lista csak olvasható, a szerkesztés ebben a fókuszált, több hasábos
+   panelben történik (nagy monitoron is kényelmesen elfér, és jóval
+   kevesebb interaktív mezőt renderel egyszerre, mint az összes sor
+   egyidejű szerkeszthetősége). */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 17, 26, 0.5);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 3vh 1rem;
+  overflow-y: auto;
+  z-index: 100;
+}
+.modal {
+  width: 100%;
+  max-width: 640px;
+  max-height: 94vh;
+  overflow-y: auto;
+}

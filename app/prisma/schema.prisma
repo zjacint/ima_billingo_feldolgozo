@@ -1,0 +1,546 @@
+// Billingo -> IMA kimenő (vevői) számla admin adatmodell — ld. docs/tervezes.md
+// 4. fejezet. PostgreSQL (Cloud SQL) ellen. Az 5.2-höz hasonló üzleti
+// invariánsokat (minden céghez legalább egy könyvelő stb.) az alkalmazás
+// réteg kényszeríti ki tranzakcióban (ld. src/lib/rbac.ts), nem tiszta
+// FK/unique megkötés.
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  konyvelo
+  adminisztrator
+}
+
+enum CompanyStatus {
+  active
+  paused
+}
+
+enum InvoiceStatus {
+  synced
+  needs_review
+  approved
+  submitted
+  booked
+  failed
+  // A könyvelő explicit kizárta a beküldésből (pl. téves adat, duplikátum,
+  // nem könyvelendő) — ld. docs/tervezes.md 6. fejezet, 2026.08.12-i
+  // kiegészítés. Nem automatikus, csak kézi művelettel érhető el.
+  rejected
+}
+
+enum MappingRuleSource {
+  learned_invoiceanalytics
+  manual
+}
+
+// original = a tétel összegei változatlanul mennek IMA-nak; negative = a
+// tétel a könyvelésben negatív előjelű (pl. garanciális visszatartás,
+// jóteljesítési garancia) — ld. docs/tervezes.md 9.2.
+enum AmountSign {
+  original
+  negative
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String
+  role      UserRole
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  companyMemberships    CompanyUser[]
+  createdCompanies      Company[]         @relation("CompanyCreatedBy")
+  mappingRuleEdits      MappingRule[]     @relation("MappingRuleUpdatedBy")
+  approvedInvoices      Invoice[]         @relation("InvoiceApprovedBy")
+  rejectedInvoices      Invoice[]         @relation("InvoiceRejectedBy")
+  auditLogEntries       AuditLog[]        @relation("AuditLogActor")
+  otpAllowedEmailsAdded OtpAllowedEmail[] @relation("OtpAllowedEmailAddedBy")
+
+  @@map("users")
+}
+
+// Admin által kezelt fehérlista a nem-domain (nem Google Workspace SSO-s)
+// felhasználók email-OTP bejelentkezéséhez — ld. docs/tervezes.md 5. fejezet.
+// Az itt szereplő email cím önmagában NEM hoz létre bejelentkezési jogot: az
+// OTP csak a *hitelesítés* módja, a belépéshez ezen felül létező `User`
+// rekord is kell (pre-provisioning elv, ugyanaz, mint a Google SSO-nál).
+model OtpAllowedEmail {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  note      String?
+  addedById String
+  addedBy   User     @relation("OtpAllowedEmailAddedBy", fields: [addedById], references: [id])
+  createdAt DateTime @default(now())
+
+  @@map("otp_allowed_emails")
+}
+
+// Kiküldött, még fel nem használt (vagy már felhasznált/lejárt) egyszer
+// használatos kódok. A kódot magát nem tároljuk nyílt szövegként, csak
+// hash-elve (ld. src/lib/otp.ts) — a sor létrehozási ideje szolgál a
+// óránkénti kérésszám-limit alapjául is (ld. docs/tervezes.md 5. fejezet).
+model OtpCode {
+  id         String    @id @default(cuid())
+  email      String
+  codeHash   String
+  expiresAt  DateTime
+  consumedAt DateTime?
+  attempts   Int       @default(0)
+  createdAt  DateTime  @default(now())
+
+  @@index([email, createdAt])
+  @@map("otp_codes")
+}
+
+model Company {
+  id     String        @id @default(cuid())
+  name   String
+  status CompanyStatus @default(active)
+
+  // Billingo API kulcs, cégenként (a Billingo fiók cégenként külön kulcsot
+  // ad ki) — ld. docs/tervezes.md 2.1.
+  billingoApiKey       String?
+  // Az ELSŐ szinkron csak ettől a dátumtól kéri le a Billingo számlákat —
+  // enélkül egy újonnan induló cégnél is évekre visszamenőleg lekérdezné a
+  // teljes Billingo-előzményt (ld. docs/tervezes.md 7. fejezet). A
+  // MÁSODIK és további szinkronok ettől függetlenül mindig
+  // `lastBillingoSyncAt`-tól inkrementálisak.
+  billingoSyncFromDate DateTime?
+
+  // Devizás számláknál a Billingo `conversion_rate`-jét (a ténylegesen
+  // alkalmazott árfolyamot) NEM cseréljük le — csak ELLENŐRIZZÜK ez
+  // ellen a hivatalos MNB (alap) vagy egy konkrét bank (napiarfolyam.hu)
+  // jegyzését, mert a Billingo csak az MNB árfolyamot ajánlja fel
+  // automatikusan a felhasználónak, egy attól eltérőt nem — ld.
+  // src/lib/exchangeRate.ts, docs/tervezes.md 7. fejezet (2026.08.11-i
+  // kiegészítés).
+  useMnbExchangeRate Boolean @default(true)
+  exchangeRateBank   String?
+
+  // IMA API hitelesítő adatok, cégenként — az API host-ok (imaapi.imaerp.hu /
+  // clientapi.imaerp.hu) NEM cégenkéntiek, kódba égetett konstansok (ld.
+  // src/lib/imaApiClient.ts, docs/tervezes.md 2.2).
+  imaApiKey     String?
+  imaApiUser    String?
+  imaApiCompany String?
+
+  // Az előlegszámlák (Billingo `type: advance`) ÉS a végszámla/normál/
+  // stornó számlák azon tételei, amik a megjegyzésükben egy MÁR
+  // igazoltan előleg típusú számlára hivatkoznak, mindig erre a
+  // főkönyvi számra kontírozódnak — ld. docs/tervezes.md 9.5,
+  // 2026.08.14-i kiegészítés (könyvelői szabály). Ha üres, a rendszer
+  // megpróbálja levezetni a meglévő, "advance" bizonylattípusra tanult
+  // szabályokból (ha van egyértelmű/domináns kontír).
+  primaryAdvanceGlaCode String?
+
+  // "OSS jelző": a cég TÉNYLEGESEN regisztrált-e az uniós egyablakos
+  // (OSS) rendszerre — ld. docs/tervezes.md 13. fejezet, könyvelői döntés
+  // (2026.08.16): mivel a rendszer csak azt dolgozza fel, amit a kliens
+  // már kiállított, a szigorú (ország + áfa kulcs) IMA áfa-megfeleltetés
+  // csak akkor kötelező a beküldésnél, ha ez a kapcsoló TRUE — a
+  // 10.000 EUR-os küszöb figyelése/kijelzése ETTŐL FÜGGETLENÜL, mindig fut
+  // (ld. src/lib/ossThreshold.ts).
+  ossRegistered Boolean @default(false)
+
+  // Csak megjelenítési célra ("utoljára szinkronizálva ekkor") — a
+  // következő szinkron start_date szűrőjéhez a `billingoLastSyncedInvoiceDate`
+  // számít, NEM ez, mert ez a szinkron FUTTATÁSÁNAK időpontja, a Billingo
+  // `start_date` viszont a SZÁMLA KELTÉRE szűr — a kettő összekeverése azt
+  // eredményezné, hogy egy visszamenőleges keltezésű, később rögzített
+  // számla véglegesen kimaradna (ld. docs/tervezes.md 7. fejezet).
+  lastBillingoSyncAt            DateTime?
+  // A legkésőbbi számla-kelte (Billingo `invoice_date`) az eddig
+  // feldolgozott számlák közül — ez a következő szinkron `start_date`
+  // szűrője, hogy visszamenőleges keltezésű, de később rögzített számlák
+  // se maradjanak ki.
+  billingoLastSyncedInvoiceDate DateTime?
+
+  createdById String
+  createdBy   User     @relation("CompanyCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  members         CompanyUser[]
+  partners        Partner[]
+  mappingRules    MappingRule[]
+  invoices        Invoice[]
+  auditLogs       AuditLog[]
+  vatCodeMappings VatCodeMapping[]
+  glaAccountCache ImaGlaAccountCache[]
+  vatKeyCache     ImaVatKeyCache[]
+  partnerCache    ImaPartnerCache[]
+  paymentMethodCache    ImaPaymentMethodCache[]
+  paymentMethodMappings PaymentMethodMapping[]
+  ossVatCodeMappings    OssVatCodeMapping[]
+
+  @@map("companies")
+}
+
+// IMA számlatükör/áfa kulcs lista KÉZZEL frissíthető másolata — ld.
+// docs/tervezes.md 10. fejezet, 2026.08.14-i átalakítás (könyvelői
+// visszajelzés: "az áfa kulcs és számlatükör frissítés ne legyen
+// automatikus, kézzel lehessen indítani, ahogy a szabály kalkulációt").
+// Korábban a Kontír/áfa szabályok és Beállítások oldal MINDEN
+// betöltéskor élőben (majd rövid TTL-lel) kérte le ezt IMA-tól — ez
+// felesleges terhelés és lassulás forrása volt. Mostantól az oldalak
+// KIZÁRÓLAG ebből a táblából olvasnak, a tényleges IMA-lekérdezést egy
+// külön, kézzel indítható "Frissítés" gomb futtatja (ld.
+// src/app/api/companies/[companyId]/ima-reference/refresh/route.ts).
+model ImaGlaAccountCache {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  code      String
+  name      String
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, code])
+  @@map("ima_gla_account_cache")
+}
+
+model ImaVatKeyCache {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  code      String
+  name      String
+  percent   Float?
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, code])
+  @@map("ima_vat_key_cache")
+}
+
+// Az IMA-ban rögzített partnerek (vevők) KÉZZEL frissíthető másolata —
+// ugyanaz a manuális-frissítésű cache-minta, mint a fenti kettőnél. Ez adja
+// az alap ügyfél-listát és az adószám-alapú párosítás forrását a Partnerek
+// oldalon (`Partner.imaPartnerCode` kitöltéséhez), hogy a könyvelőnek ne
+// kelljen kézzel begépelnie egy már IMA-ban létező partner azonosítóját.
+model ImaPartnerCache {
+  id            String   @id @default(cuid())
+  companyId     String
+  company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  imaPartnerId  Int
+  name          String
+  taxNumber     String?
+  updatedAt     DateTime @updatedAt
+
+  @@unique([companyId, imaPartnerId])
+  @@map("ima_partner_cache")
+}
+
+// Az IMA-ban (cégenként) beállított fizetési módok KÉZZEL frissíthető
+// másolata — ugyanaz a cache-minta, mint fent. A nyers beküldő végpont
+// `payment_method` mezője "Leírás alapú azonosítás" (ld. IMA openapi
+// séma) — csak egy, a cégnél TÉNYLEGESEN létező `PaymentM_Desc` érték
+// fogadható el, szabad szöveg (pl. a mi generikus "transfer" kódunk) HTTP
+// 422-t ad ("Payment method not found for id/desc: ..."). Innen választ a
+// könyvelő a Beállítások oldalon a `PaymentMethodMapping`-hoz.
+model ImaPaymentMethodCache {
+  id               String   @id @default(cuid())
+  companyId        String
+  company          Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  imaId            Int
+  desc             String
+  navPayMethodType String?
+  updatedAt        DateTime @updatedAt
+
+  @@unique([companyId, imaId])
+  @@map("ima_payment_method_cache")
+}
+
+// Explicit megfeleltetés a mi belső, normalizált fizetési mód-kódjaink
+// (`mapBillingoPaymentMethodToIma` — transfer/cash/card/cod/other) és egy
+// ténylegesen létező IMA fizetési mód leírása között — élő beküldési hiba
+// nyomán (ld. fent). Fix kulcskészlet (5 lehetséges
+// `billingoPaymentMethod` érték), a könyvelő a Beállítások oldalon
+// párosítja mindegyiket egy IMA fizetési móddal.
+model PaymentMethodMapping {
+  id                   String   @id @default(cuid())
+  companyId            String
+  company              Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  billingoPaymentMethod String
+  imaPaymentMethodDesc  String
+  updatedAt            DateTime @updatedAt
+
+  @@unique([companyId, billingoPaymentMethod])
+  @@map("payment_method_mappings")
+}
+
+// Explicit, kézzel karbantartott Billingo áfa érték -> IMA áfa kód
+// megfeleltetés (ld. docs/tervezes.md 8.3, 2026.08.12-i kiegészítés,
+// könyvelői visszajelzés: a formai áfa-megfeleltetést a kontírozási
+// szabályok mellett, jól láthatóan/szerkeszthetően kérte a Beállításokhoz).
+// Szándékosan KÜLÖN a MappingRule-tól: ez egy egyszerű, egzakt
+// érték-párosítás (nincs partner/termék/megjegyzés feltétel), a
+// suggestMappingForLine csak akkor esik erre vissza, ha egyetlen
+// MappingRule sem ad vatCode-ot (ld. mappingRuleEngine.ts).
+model VatCodeMapping {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  // A Billingo `Vat` mező eredeti értéke (pl. "27%", "AAM", "F.AFA") — ld. docs/tervezes.md 8.3.
+  billingoVatValue String
+  // Az IMA-nak ténylegesen küldendő áfa kód (pl. "27%", "ÁKK").
+  imaVatCode       String
+  note             String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, billingoVatValue])
+  @@map("vat_code_mappings")
+}
+
+// SZIGORÚ (ország + Billingo áfa érték) -> IMA áfa kód megfeleltetés az OSS
+// (uniós egyablakos) rendszer szerint kiállított számlákhoz — ld.
+// docs/tervezes.md 13. fejezet, könyvelői döntés (2026.08.16): "ha nem
+// magyar áfával számolunk akkor az egy szigorú megfeleltetés legyen az
+// IMA-ban... egyes tagállamok azonos áfa kulcsot is használhatnak, tehát
+// tagállam + áfa kulcs legyen a megfeleltetési pont". SZÁNDÉKOSAN külön
+// tábla a sima `VatCodeMapping`-től (nem csak egy opcionális `countryCode`
+// mezővel bővítve), mert az ottani egyszerű egyedi kulcs
+// (`companyId+billingoVatValue`) jelentése (belföldi leképezés) nem
+// keveredhet ezzel — csak `Company.ossRegistered == true` esetén,
+// kizárólag a külföldi EU magánszemély (OSS-érintett) partnerek
+// számláinál olvassa a beküldés (ld. `submitInvoiceToIma`).
+model OssVatCodeMapping {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  // ISO 3166-1 alpha-2 tagállam kód (pl. "DE", "AT") — a Billingo partner
+  // `countryCode` mezőjével egyezik.
+  countryCode      String
+  billingoVatValue String
+  imaVatCode       String
+  note             String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, countryCode, billingoVatValue])
+  @@map("oss_vat_code_mappings")
+}
+
+model CompanyUser {
+  companyId String
+  userId    String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@id([companyId, userId])
+  @@map("company_users")
+}
+
+// A `/api/import/sales-invoice` üzleti adatból (név/adószám/cím) oldja fel a
+// partnert az IMA oldalon automatikusan — nincs kézi IMA-azonosító
+// párosítási kényszer (ld. docs/tervezes.md 8.1, 2026.08.09-i pontosítás).
+// Az `imaPartnerCode` csak opcionális, ismert IMA-oldali kód rögzítésére
+// szolgál, ha a könyvelő kényszeríteni akarja.
+model Partner {
+  id                String   @id @default(cuid())
+  companyId         String
+  company           Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  billingoPartnerId String
+  name              String
+  taxNumber         String?
+  postalCode        String?
+  city              String?
+  addressStreet     String?
+  countryCode       String?
+  imaPartnerCode    String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  mappingRules MappingRule[]
+  invoices     Invoice[]
+
+  @@unique([companyId, billingoPartnerId])
+  @@map("partners")
+}
+
+// Az `/invoiceanalytics`-ból tanult, valamint a könyvelő által kézzel
+// felvitt/felülírt kontír/áfa szabályok közös tábla, forrás-jelöléssel — ld.
+// docs/tervezes.md 9. fejezet. Beküldésnél `line_gla_code`/`line_vat_code`
+// opcionális felülbírálásként megy ki (ld. 8.2).
+//
+// TÖBB-FELTÉTELES szabály (ld. 9.1): a kitöltött feltétel-mezők ÉS
+// kapcsolatban vannak (mindnek illeszkednie kell), legalább egy feltétel
+// kötelező. A `productNamePattern`/`commentPattern`/`vatPattern` mezők
+// kis/nagybetű-független tartalmazás-illesztést végeznek, `|`-lal
+// elválasztott alternatívákkal (VAGY egy mezőn belül) — ld.
+// src/lib/mappingRuleEngine.ts.
+model MappingRule {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  partnerId String?
+  partner   Partner? @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+
+  // Feltételek — mind opcionális, de legalább egy kötelező (API-szinten
+  // kikényszerítve, ld. src/app/api/companies/[companyId]/rules/route.ts).
+  productNamePattern  String?
+  // A tétel VAGY a számla fejléc megjegyzésére illeszkedik (ld. 9.1) — pl.
+  // "garanciális visszatartás|jóteljesítési garancia".
+  commentPattern      String?
+  // A Billingo `Document.type` értékére illeszkedik (pl. "advance").
+  documentTypePattern String?
+  // A Billingo `Vat` (tétel áfa kulcs/kód) értékére illeszkedik (pl. "F.AFA").
+  vatPattern          String?
+
+  // Hatás.
+  // Árbevétel (eredmény-) kontír — ld. docs/tervezes.md 8.3/9.4,
+  // 2026.08.12-i élő megerősítés: az IMA `/invoiceanalytics` `GLAID`
+  // mezőjéből tanulva (NEM `Bal_Account_No`, ami vevői/követelés szám).
+  glaCode    String
+  vatCode    String
+  // KÜLÖN főkönyvi szám az ÁFA postázásához (pl. "4671") — az IMA
+  // `/invoiceanalytics` `GLA_CodeSales` mezőjéből tanulva, megkülönböztetve
+  // az árbevétel-kontírtól — ld. docs/tervezes.md 8.3, 2026.08.12-i
+  // kiegészítés (könyvelői kérés). Csak MEGJELENÍTÉSRE/ellenőrzésre
+  // szolgál — az IMA beküldő végpont nem fogad el rá külön felülbírálást,
+  // az áfa kódból (vatCode) automatikusan levezeti.
+  vatGlaCode String?
+  amountSign AmountSign @default(original)
+  // Szabad szöveges magyarázat a könyvelőnek (miért létezik a szabály).
+  note       String?
+
+  source        MappingRuleSource
+  // Tanult szabálynál az /invoiceanalytics-beli előfordulási arány (0-1).
+  confidence    Float?
+  active        Boolean           @default(true)
+  // Mikor illesztette utoljára `suggestMappingForLine` egy tényleges
+  // számlasorra — null, ha a szabály LÉTREJÖTTE ÓTA SOHA nem futott le. Ez
+  // adja a "gyorsított törlési protokoll" alapját a soha nem használt
+  // szabályok kereséséhez (ld. docs/tervezes.md 9., 2026.08.12-i kiegészítés).
+  lastMatchedAt DateTime?
+  updatedById   String?
+  updatedBy     User?             @relation("MappingRuleUpdatedBy", fields: [updatedById], references: [id])
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  @@index([companyId, partnerId])
+  @@map("mapping_rules")
+}
+
+// Egy Billingo dokumentum = egy sor. A `billingoDocumentId` unique kulcs
+// védi a duplikált szinkront (ld. docs/tervezes.md 7. fejezet).
+model Invoice {
+  id                     String        @id @default(cuid())
+  companyId              String
+  company                Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  billingoDocumentId     String
+  billingoDocumentNumber String?
+  partnerId              String?
+  partner                Partner?      @relation(fields: [partnerId], references: [id])
+  status                 InvoiceStatus @default(synced)
+
+  invoiceType                String    @default("invoice")
+  // A Billingo `type: invoice` bizonylatnak van-e kapcsolódó előlegszámlája
+  // (`related_documents` nem üres) — ez különbözteti meg a "végszámlát" a
+  // "normál számlától" (az "előlegszámla" maga az `invoiceType == "advance"`
+  // eset) — ld. docs/tervezes.md 7. fejezet, 2026.08.12-i kiegészítés.
+  hasAdvanceSettlement       Boolean   @default(false)
+  // A Billingo `Document.cancelled` mezője — korábban a szinkron teljesen
+  // kihagyta a törölt/sztornózott bizonylatokat, 2026.08.16-tól (könyvelői
+  // kérés) ezek is bekerülnek, ezzel a jelzővel megkülönböztetve, hogy a
+  // könyvelő lássa és eldönthesse (ld. docs/tervezes.md 15. fejezet).
+  billingoCancelled          Boolean   @default(false)
+  paymentMethod              String    @default("other")
+  currencyCode               String    @default("HUF")
+  exchangeRate               Decimal?
+  // Ha a Billingo számla devizás és hiányzik/eltér a cégen beállított
+  // hivatalos (MNB/bank) árfolyamtól, itt jelenik meg a figyelmeztetés —
+  // ld. src/lib/exchangeRate.ts, docs/tervezes.md 7. fejezet.
+  exchangeRateWarning        String?
+  docDate                    DateTime?
+  // A Billingo eredeti teljesítés dátuma — szinkron mindig felülírja
+  // (jóváhagyott/beküldött számlánál már nem, ld. NOT_OVERWRITABLE).
+  fulfillmentDate            DateTime?
+  // A könyvelő kézi felülbírálása az IMA-nak ténylegesen küldött ÁFA
+  // teljesítés dátumára — KÜLÖN mező a `fulfillmentDate`-től, hogy a
+  // Billingo eredeti értéke NE vesszen el felülíráskor (ld. docs/tervezes.md
+  // 8.2, 2026.08.12-i kiegészítés). Ha null, a `fulfillmentDate` megy ki.
+  vatFulfillmentDateOverride DateTime?
+  dueDate                    DateTime?
+  netAmount                  Decimal?
+  vatAmount                  Decimal?
+  grossAmount                Decimal?
+  // A Billingo `Document.comment` (fejléc-szintű megjegyzés) — a
+  // `commentPattern` szabályok ezt (is) illesztik, ld. docs/tervezes.md 9.1.
+  comment                    String?
+
+  // Tételek + a javasolt/jóváhagyott glaCode/vatCode soronként — ld.
+  // docs/tervezes.md 9. fejezet, InvoiceLine (src/lib/types.ts).
+  lines Json
+
+  approvedById String?
+  approvedBy   User?     @relation("InvoiceApprovedBy", fields: [approvedById], references: [id])
+  approvedAt   DateTime?
+
+  rejectedById    String?
+  rejectedBy      User?     @relation("InvoiceRejectedBy", fields: [rejectedById], references: [id])
+  rejectedAt      DateTime?
+  rejectionReason String?
+
+  imaImportBatchId     Int?
+  imaIncomingInvoiceId Int?
+  imaSalesheaderId     Int?
+  imaPushError         String?
+  // A Billingo PDF IMA-hoz csatolásának eredménye — csak `booked` számlánál
+  // értelmezett (a csatolás a sikeres beküldés UTÁN, best-effort történik,
+  // sosem hiúsítja meg magát a beküldést) — ld. imaApiClient.ts
+  // `uploadSalesInvoiceImageToIma`.
+  imaImageUploaded    Boolean @default(false)
+  imaImageUploadError String?
+
+  // A számla fejléc- vagy tétel-megjegyzésében felismert fizetési
+  // szolgáltatói tranzakcióazonosító (pl. Stripe "ch_..." bizonylat-id) —
+  // ld. src/lib/paymentTransactionDetection.ts, docs/tervezes.md 13.
+  // fejezet. NEM kerül ki az IMA beküldésben — kizárólag egy KÜLÖN
+  // kiegyenlítési import CSV forrása (könyvelői döntés: a felismerés a
+  // Billingo-oldali jelzésből indul, a tényleges egyeztetés a Stripe
+  // kivonattal a könyvelő dolga).
+  detectedPaymentTransactionId String?
+  detectedPaymentProcessor     String?
+  // Mikor került bele utoljára egy kiegyenlítési export CSV-be — hogy egy
+  // ismételt export ne duplikálja a már egyszer kiadott sorokat.
+  settlementExportedAt         DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, billingoDocumentId])
+  @@index([companyId, status])
+  @@map("invoices")
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  actorId    String?
+  actor      User?    @relation("AuditLogActor", fields: [actorId], references: [id])
+  action     String
+  entityType String
+  entityId   String
+  before     Json?
+  after      Json?
+  createdAt  DateTime @default(now())
+
+  @@index([companyId, createdAt])
+  @@map("audit_log")
+}

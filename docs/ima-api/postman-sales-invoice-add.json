@@ -1,0 +1,225 @@
+{
+  "info": {
+    "_postman_id": "b60e281c-5df9-4951-bd6d-bad68a434eec",
+    "name": "IMA API82 - Sales Invoice Insert Public API",
+    "description": "Bilingual test collection az ima-api82 `/api/invoices/sales/add/{apikey}` publikus vegponthoz. A requestek nyers JSON body-val mennek, es a legacy auth fejleceket hasznaljak: `api-key`, `user`, `company`.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "7112580",
+    "_collection_link": "https://go.postman.co/collection/7112580-b60e281c-5df9-4951-bd6d-bad68a434eec?source=collection_link"
+  },
+  "item": [
+    {
+      "name": "01. Vevoi szamla beszurasa / Add sales invoice (existing partner)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "api-key",
+            "value": "{{apiKey}}",
+            "type": "text"
+          },
+          {
+            "key": "user",
+            "value": "{{user}}",
+            "type": "text"
+          },
+          {
+            "key": "company",
+            "value": "{{company}}",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"header_data\": [\n    {\n      \"invoice_external_id\": \"{{invoiceExternalId}}\",\n      \"partner_id\": {{partnerId}},\n      \"posting_date\": \"{{postingDate}}\",\n      \"doc_date\": \"{{postingDate}}\",\n      \"vat_date\": \"{{postingDate}}\",\n      \"due_date\": \"{{dueDate}}\",\n      \"invoice_type\": \"invoice\",\n      \"currency\": \"HUF\",\n      \"gross_amount\": 127000,\n      \"payment_method\": \"Atutalas\",\n      \"invoice_source\": \"{{invoiceSource}}\",\n      \"external_accounting_mode\": \"{{externalAccountingMode}}\",\n      \"external_comments\": [\n        {\n          \"external_source\": \"cadren\",\n          \"external_id\": \"{{externalCommentId}}\",\n          \"user_name\": \"Kovacs Anna\",\n          \"date_added\": \"2026-06-30T09:15:00+02:00\",\n          \"comment\": \"Ugyfel altal rogzitett megjegyzes.\"\n        },\n        {\n          \"external_id\": \"CAD-COM-002\",\n          \"user_name\": \"Nexol Bot\",\n          \"date_added\": \"20260630\",\n          \"comment\": \"Masodik kulso megjegyzes.\"\n        }\n      ],\n      \"lines_data\": [\n        {\n          \"unit_cost_type\": \"netto\",\n          \"line_type\": \"invoice\",\n          \"description\": \"Eves elofizetes\",\n          \"quantity\": 1,\n          \"line_unit_cost\": 100000,\n          \"vat_code\": \"{{vatCode}}\"\n        }\n      ]\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/invoices/sales/add/{{apiKey}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "invoices",
+            "sales",
+            "add",
+            "{{apiKey}}"
+          ]
+        },
+        "description": "Meglevo partner_id-vel kuld egy egyszeru HUF-os vevoi szamlat. This is the smallest practical success-case payload."
+      },
+      "response": []
+    },
+    {
+      "name": "02. Partner objektummal / Add sales invoice (resolve or create partner)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "api-key",
+            "value": "{{apiKey}}",
+            "type": "text"
+          },
+          {
+            "key": "user",
+            "value": "{{user}}",
+            "type": "text"
+          },
+          {
+            "key": "company",
+            "value": "{{company}}",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"header_data\": [\n    {\n      \"invoice_external_id\": \"CRM-2026-0002\",\n      \"partner_match_by_code\": 1,\n      \"partner\": {\n        \"customers_company\": \"{{partnerName}}\",\n        \"customers_code\": \"{{partnerCode}}\",\n        \"customers_vat_number\": \"12345678-2-42\",\n        \"addresses\": [\n          {\n            \"entry_postcode\": \"1117\",\n            \"entry_city\": \"Budapest\",\n            \"entry_country\": \"HU\",\n            \"entry_street_address\": \"Minta utca 1.\",\n            \"entry_address_type\": \"invoice\"\n          }\n        ]\n      },\n      \"posting_date\": \"{{postingDate}}\",\n      \"invoice_type\": \"invoice\",\n      \"currency\": \"EUR\",\n      \"exchange_rate\": 400,\n      \"gross_amount\": 317.5,\n      \"payment_method\": \"Bank card\",\n      \"worknumber\": \"WN-001|Projekt A\",\n      \"spend_place\": \"SP-01|Kozpont\",\n      \"lines_data\": [\n        {\n          \"unit_cost_type\": \"netto\",\n          \"line_type\": \"invoice\",\n          \"description\": \"Consulting\",\n          \"quantity\": 1,\n          \"line_unit_cost\": 250,\n          \"vat_code\": \"{{vatCode}}\"\n        }\n      ]\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/invoices/sales/add/{{apiKey}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "invoices",
+            "sales",
+            "add",
+            "{{apiKey}}"
+          ]
+        },
+        "description": "A partner nem partner_id alapjan jon, hanem a `partner` objektumbol oldodik fel vagy jon letre. Useful for external integrations that do not know internal partner IDs."
+      },
+      "response": []
+    },
+    {
+      "name": "03. Duplikacio teszt / Duplicate check replay",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          },
+          {
+            "key": "api-key",
+            "value": "{{apiKey}}",
+            "type": "text"
+          },
+          {
+            "key": "user",
+            "value": "{{user}}",
+            "type": "text"
+          },
+          {
+            "key": "company",
+            "value": "{{company}}",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"header_data\": [\n    {\n      \"invoice_external_id\": \"{{invoiceExternalId}}\",\n      \"partner_id\": {{partnerId}},\n      \"posting_date\": \"{{postingDate}}\",\n      \"invoice_type\": \"invoice\",\n      \"currency\": \"HUF\",\n      \"gross_amount\": 127000,\n      \"payment_method\": \"Atutalas\",\n      \"lines_data\": [\n        {\n          \"unit_cost_type\": \"netto\",\n          \"line_type\": \"invoice\",\n          \"description\": \"Eves elofizetes\",\n          \"quantity\": 1,\n          \"line_unit_cost\": 100000,\n          \"vat_code\": \"{{vatCode}}\"\n        }\n      ]\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/invoices/sales/add/{{apiKey}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "invoices",
+            "sales",
+            "add",
+            "{{apiKey}}"
+          ]
+        },
+        "description": "Ugyanazt a kulso azonosito + posting_date kombot ismetli meg. Ezzel ellenorizheto a duplikacio-vedelem (tipikusan 409 vagy hibavalasz)."
+      },
+      "response": []
+    }
+  ],
+  "variable": [
+    {
+      "key": "invoiceExternalId",
+      "value": "WEB-2026-0001"
+    },
+    {
+      "key": "postingDate",
+      "value": "20260710"
+    },
+    {
+      "key": "dueDate",
+      "value": "20260725"
+    },
+    {
+      "key": "partnerId",
+      "value": "125"
+    },
+    {
+      "key": "vatCode",
+      "value": "27%"
+    },
+    {
+      "key": "invoiceSource",
+      "value": "webshop"
+    },
+    {
+      "key": "externalAccountingMode",
+      "value": "Robotkontir"
+    },
+    {
+      "key": "externalCommentId",
+      "value": "CAD-COM-001"
+    },
+    {
+      "key": "partnerCode",
+      "value": "PART-001"
+    },
+    {
+      "key": "partnerName",
+      "value": "Minta Partner Kft."
+    }
+  ]
+}

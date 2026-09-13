@@ -1,0 +1,42 @@
+{
+  "name": "billingo-ima-admin",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/lib/*.test.ts",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "seed": "tsx prisma/seed.ts",
+    "sync:billingo": "tsx scripts/sync-billingo.ts",
+    "learn:invoiceanalytics": "tsx scripts/learn-invoiceanalytics.ts"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.20.0",
+    "next": "14.2.35",
+    "next-auth": "^4.24.8",
+    "nodemailer": "^7.0.7",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.10",
+    "@types/nodemailer": "^6.4.16",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.0",
+    "prisma": "^5.20.0",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3"
+  }
+}
