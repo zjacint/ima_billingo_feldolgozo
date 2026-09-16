@@ -159,7 +159,7 @@ kérdések).
 | **Order** | `id`, `orderNumber` (megjelenített rendelésszám, pl. `2026-0001548`), `partnerId`, `orderType` (`normal`/`akcios`), `status` (ld. 6. fejezet), `createdById` (partner vagy belső user, ld. 11.), `requestedDeliveryDate`, `confirmedDeliveryDate`, `shippingAddressId`, `paymentMethod`, `currency`, `cutoffAppliedAt`, `roolExportBatchId` (nullable), `roolVmsNumber` (nullable), `lockedAt` (nullable — ld. 12.3) | Egy rendelés fejléce |
 | **OrderLine** | `id`, `orderId`, `productId`, `productCodeSnapshot`, `productNameSnapshot`, `quantity`, `quantityUnit`, `unitPriceSnapshot`, `netAmount`, `vatRate`, `vatAmount`, `grossAmount`, `fulfillmentStatus` (`pending`/`confirmed`/`short`/`unavailable`), `fulfilledQuantity` (nullable) | A "fix adatok" listája (2026.09.07-i e-mail): árukód, áru név, ETK, darab (gyűjtő), kiszerelési egység, mennyiség, mennyiségi egység, egységár, nettó érték, adó mérték, adó érték, bruttó érték — mindegyik **snapshot**-ként tárolva rendeléskor, hogy egy utólagos ár-/termékváltozás ne írja át a már leadott rendelést |
 | **OrderAuditLog** | `id`, `orderId`, `actorType` (`partner`/`staff`/`system`), `actorId`, `action` (`created`/`modified`/`submitted`/`exported_to_rool`/`fulfillment_updated`/`cancelled`), `before`/`after` (JSON), `createdAt` | Ki-mit-mikor módosított — a riportálás és a "módosítható, amíg ROOL-ba nem kerül" szabály (ld. 6., 12.3) ellenőrizhetőségéhez |
-| **Complaint** | `id`, `type` (`partner_b2b`/`consumer`), `partnerId` (nullable — a fogyasztói panasz nem feltétlenül regisztrált partnertől jön), `orderId` (nullable), `category`, `subcategory`, `description`, `attachments[]`, `contactName`, `contactAddress`, `contactEmail`, `contactPhone`, `purchaseLocation`/`purchaseDate`/`receiptNumber`/`productCode`/`purchasedQty` (csak `consumer` típusnál), `status` (`new`/`in_progress`/`awaiting_customer`/`resolved`/`rejected`), `assignedToId`, `responseDueAt`, `promisedResponseText`, `resolutionNote`, `createdAt` | A két űrlap közös táblája, típus szerint eltérő kitöltött mezőkkel — ld. 15. fejezet. `responseDueAt`/`promisedResponseText`: 2026.09.16-i pontosítás (ld. 15.3–15.4) |
+| **Complaint** | `id`, `type` (`partner_b2b`/`consumer`), `partnerId` (nullable — a fogyasztói panasz nem feltétlenül regisztrált partnertől jön), `orderId` (nullable), `category`, `subcategory`, `description`, `attachments[]`, `contactName`, `contactAddress`, `contactEmail`, `contactPhone`, `purchaseLocation`/`purchaseDate`/`receiptNumber`/`productCode`/`purchasedQty` (csak `consumer` típusnál), `status` (`new`/`in_progress`/`awaiting_customer`/`resolved`/`rejected`), `assignedToId`, `responseDueAt`, `promisedResponseText`, `resolutionNote`, `resolvedAt` (nullable), `createdAt` | A két űrlap közös táblája, típus szerint eltérő kitöltött mezőkkel — ld. 15. fejezet. `responseDueAt`/`promisedResponseText`: 2026.09.16-i pontosítás (ld. 15.3–15.4). `resolvedAt`: 2026.09.16-i 2. kör (ld. 15.6) — a tényleges lezárás időpontja, az SLA-riporthoz szükséges; a "Válasz elküldése és lezárás" gomb automatikusan tölti ki `status = resolved`-del együtt |
 | **ComplaintStatusLog** | `id`, `complaintId`, `status`, `changedById`, `note`, `createdAt` | Ki mikor milyen státuszra állította a panaszt — az `OrderAuditLog`-hoz hasonló minta, 2026.09.16-i kiegészítés (ld. 15.3) |
 | **OtpAllowedEmail** *(csak belső staff OTP-hez, ha van nem-Workspace belső user)* | mint a testvérprojektben | A partner-OTP a `PartnerUser.email`-t használja, nem külön fehérlistát (ld. 5.2) |
 
@@ -566,6 +566,10 @@ vezetői nézet):
   további elemzéshez).
 - Az `OrderAuditLog` biztosítja, hogy módosítás esetén is visszakereshető,
   ki mit változtatott és mikor.
+- **SLA-teljesítés (panaszkezelés)** — 2026.09.16-i kiegészítés (ld. 15.6):
+  hány panasz zárult a vállalt válaszidőn belül vs. túllépve, átlagos
+  válaszidő, felelősönkénti/kategóriánkénti bontás; a még nyitott,
+  határidőn túli panaszok külön kiemelve.
 
 ## 14. Minimális CRM
 
@@ -674,6 +678,61 @@ egy közös **panaszkezelési munkasorba** kerül (belső, ügyfélszolgálati/
 adminisztrátori felület, ld. 16.15). A B2B panasz a partner-részletezőn
 is megjelenik (ld. 14. fejezet).
 
+### 15.6 SLA-figyelés, emlékeztetők és a válasz lezárása (2026.09.16-i pontosítás, 2. kör)
+
+Szécsi Borbála négy további kérdésére a válaszok:
+
+**1. Határidő-túllépés riportálása.** Igen — mivel minden panasznak van
+`responseDueAt` mezője, a "határidőn túl van, de még nincs lezárva"
+eset egyszerűen lekérdezhető (`status` nem `resolved`/`rejected` ÉS
+`responseDueAt` a múltban van). Ez két helyen jelenik meg:
+- a **Panaszkezelési munkasoron** (16.15) egy kiemelt, piros "Határidőn
+  túl" szűrő/kártya mutatja az érintett panaszokat;
+- a **Riportok** oldalon (13. fejezet bővítése) egy **SLA-teljesítés
+  riport**: hány panasz zárult határidőn belül vs. túllépve, átlagos
+  válaszidő, felelősönkénti/kategóriánkénti bontás.
+  Ehhez a `Complaint` entitás egy új mezőt kap: **`resolvedAt`**
+  (a tényleges lezárás időpontja) — enélkül a "határidőn belül zárták-e"
+  utólag nem lenne kiszámolható.
+
+**2. Automatikus emlékeztető a felelősnek.** Igen, tervezhető egy napi
+ütemezett feladatként (Cloud Scheduler, ugyanaz a minta, mint a ROOL
+export, ld. 12.2):
+- **Lejárat előtt** — ha a `responseDueAt`-ig hátralévő idő eléri az
+  admin által beállított küszöböt (alapértelmezés: 3 nap, ld.
+  Beállítások, 16.16), a felelős egyszeri e-mail emlékeztetőt kap.
+- **Lejárat után** — ha a határidő lejárt és a panasz még mindig nyitva
+  van (`new`/`in_progress`/`awaiting_customer`), a felelős **naponta
+  ismétlődő** emlékeztetőt kap, amíg le nem zárja vagy át nem
+  ütemezi a határidőt.
+
+**3. A válasz csatornája — a rendszer küldi ki, nem az adott terület
+közvetlenül.** A folyamat úgy épül fel, hogy **mindig egy, a portálhoz
+hozzáféréssel rendelkező belső felhasználó** (a panasz `assignedToId`
+mezőjén szereplő felelős) írja be a végleges választ a Panaszkezelési
+munkasoron (ld. 16.15 mockup, "Válasz az ügyfélnek" mező), és **a
+rendszer küldi ki e-mailben** az ügyfélnek — nincs külön, a rendszeren
+kívüli e-mail-kör, amit utólag kellene visszamásolni. Ha egy adott
+terület (pl. termelés/raktár) **nem fér hozzá közvetlenül** a portálhoz
+(ld. 10.4, még nyitott kérdés), akkor ők a választ **a kijelölt
+felelősnek** (aki hozzáfér) adják át — telefonon, belső e-mailben vagy
+szóban —, és a felelős rögzíti/küldi ki azt a rendszeren keresztül. Ez
+azt is jelenti, hogy **ha a 10.4-ben a dedikált termelési/raktári
+szerepkör mellett döntünk**, az az adott terület számára közvetlen
+válaszküldési jogot is adna a portálon — ez a két nyitott kérdés (10.4
+és a válaszküldés) össze van kötve, együtt érdemes eldönteni.
+
+**4. A "lezárva" (resolved) státusz — automatikusan vált, a válasz
+kiküldésével egybekötve.** A Panaszkezelési munkasoron egyetlen gomb
+van: **"Válasz elküldése és lezárás"** (ld. 16.15 mockup) — ez a
+válasz-e-mail kiküldésével **egy művelet**, nem két külön lépés: a
+felelősnek nem kell utólag manuálisan "lezárva"-ra állítania a
+státuszt, a rendszer ezt automatikusan megteszi a válasz elküldésekor
+(és ekkor tölti ki a `resolvedAt`-ot). A **köztes** státuszok
+(`in_progress`, `awaiting_customer`) viszont **manuálisak** — ezeket a
+felelős explicit állítja be, amikor elkezdi a kezelést, vagy amikor
+további információra vár az ügyféltől.
+
 ## 16. UI tervezés (képernyők)
 
 > A képernyők vizuális terve (mockupok) külön, a tervezési PDF mellékletében
@@ -719,15 +778,21 @@ is megjelenik (ld. 14. fejezet).
 15. **Panaszkezelési munkasor** (belső) — lista nézet (panaszazonosító,
     partner/bejelentő, kategória, kapcsolódó rendelés, beérkezés
     dátuma, felelős, határidő, státusz — ld. 15.3), szűrhető státusz és
-    felelős szerint. Részletező nézetben a teljes panasztartalom (leírás,
-    csatolt fotó, kapcsolódó rendelés adatai), a felelős kijelölése és a
-    határidő megadása, státuszváltás, valamint az ügyfélnek küldött
-    válasz rögzítése. A panasz beérkezéséről kimenő belső e-mail
-    értesítés címe (pl. `panasz@merian.hu`) admin oldalon
-    konfigurálható (ld. 16. pont, Beállítások).
+    felelős szerint, **kiemelt "Határidőn túl" szűrő/kártya**
+    (2026.09.16-i 2. kör, ld. 15.6) a lejárt, még nyitott panaszokra.
+    Részletező nézetben a teljes panasztartalom (leírás, csatolt fotó,
+    kapcsolódó rendelés adatai), a felelős kijelölése és a határidő
+    megadása, státuszváltás, valamint az ügyfélnek küldött válasz
+    rögzítése — a **"Válasz elküldése és lezárás"** gomb egy lépésben
+    küldi ki a választ és zárja le a panaszt (`resolved`, ld. 15.6). A
+    panasz beérkezéséről kimenő belső e-mail értesítés címe (pl.
+    `panasz@merian.hu`) admin oldalon konfigurálható (ld. 16. pont,
+    Beállítások).
 16. **Beállítások** (belső, adminisztrátor) — cégszintű, admin által
     karbantartott konfiguráció: panasz-értesítési e-mail cím, panasz-
-    kategóriánkénti vállalt válaszidő (ld. 15.4), rendelési cutoff time,
+    kategóriánkénti vállalt válaszidő (ld. 15.4), a lejárat előtti
+    emlékeztető küszöbe (napban, alapértelmezés: 3 nap, ld. 15.6),
+    rendelési cutoff time,
     egyéb rendszerszintű beállítások.
 
 ## 17. GCP telepítés és domain
