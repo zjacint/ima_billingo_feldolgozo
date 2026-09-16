@@ -159,7 +159,8 @@ kérdések).
 | **Order** | `id`, `orderNumber` (megjelenített rendelésszám, pl. `2026-0001548`), `partnerId`, `orderType` (`normal`/`akcios`), `status` (ld. 6. fejezet), `createdById` (partner vagy belső user, ld. 11.), `requestedDeliveryDate`, `confirmedDeliveryDate`, `shippingAddressId`, `paymentMethod`, `currency`, `cutoffAppliedAt`, `roolExportBatchId` (nullable), `roolVmsNumber` (nullable), `lockedAt` (nullable — ld. 12.3) | Egy rendelés fejléce |
 | **OrderLine** | `id`, `orderId`, `productId`, `productCodeSnapshot`, `productNameSnapshot`, `quantity`, `quantityUnit`, `unitPriceSnapshot`, `netAmount`, `vatRate`, `vatAmount`, `grossAmount`, `fulfillmentStatus` (`pending`/`confirmed`/`short`/`unavailable`), `fulfilledQuantity` (nullable) | A "fix adatok" listája (2026.09.07-i e-mail): árukód, áru név, ETK, darab (gyűjtő), kiszerelési egység, mennyiség, mennyiségi egység, egységár, nettó érték, adó mérték, adó érték, bruttó érték — mindegyik **snapshot**-ként tárolva rendeléskor, hogy egy utólagos ár-/termékváltozás ne írja át a már leadott rendelést |
 | **OrderAuditLog** | `id`, `orderId`, `actorType` (`partner`/`staff`/`system`), `actorId`, `action` (`created`/`modified`/`submitted`/`exported_to_rool`/`fulfillment_updated`/`cancelled`), `before`/`after` (JSON), `createdAt` | Ki-mit-mikor módosított — a riportálás és a "módosítható, amíg ROOL-ba nem kerül" szabály (ld. 6., 12.3) ellenőrizhetőségéhez |
-| **Complaint** | `id`, `type` (`partner_b2b`/`consumer`), `partnerId` (nullable — a fogyasztói panasz nem feltétlenül regisztrált partnertől jön), `orderId` (nullable), `category`, `subcategory`, `description`, `attachments[]`, `contactName`, `contactAddress`, `contactEmail`, `contactPhone`, `purchaseLocation`/`purchaseDate`/`receiptNumber`/`productCode`/`purchasedQty` (csak `consumer` típusnál), `status` (`new`/`in_progress`/`resolved`/`rejected`), `assignedToId`, `resolutionNote`, `createdAt` | A két űrlap közös táblája, típus szerint eltérő kitöltött mezőkkel — ld. 15. fejezet |
+| **Complaint** | `id`, `type` (`partner_b2b`/`consumer`), `partnerId` (nullable — a fogyasztói panasz nem feltétlenül regisztrált partnertől jön), `orderId` (nullable), `category`, `subcategory`, `description`, `attachments[]`, `contactName`, `contactAddress`, `contactEmail`, `contactPhone`, `purchaseLocation`/`purchaseDate`/`receiptNumber`/`productCode`/`purchasedQty` (csak `consumer` típusnál), `status` (`new`/`in_progress`/`awaiting_customer`/`resolved`/`rejected`), `assignedToId`, `responseDueAt`, `promisedResponseText`, `resolutionNote`, `createdAt` | A két űrlap közös táblája, típus szerint eltérő kitöltött mezőkkel — ld. 15. fejezet. `responseDueAt`/`promisedResponseText`: 2026.09.16-i pontosítás (ld. 15.3–15.4) |
+| **ComplaintStatusLog** | `id`, `complaintId`, `status`, `changedById`, `note`, `createdAt` | Ki mikor milyen státuszra állította a panaszt — az `OrderAuditLog`-hoz hasonló minta, 2026.09.16-i kiegészítés (ld. 15.3) |
 | **OtpAllowedEmail** *(csak belső staff OTP-hez, ha van nem-Workspace belső user)* | mint a testvérprojektben | A partner-OTP a `PartnerUser.email`-t használja, nem külön fehérlistát (ld. 5.2) |
 
 ## 5. Hitelesítés és jogosultságok
@@ -193,6 +194,22 @@ A 2026.09.11-i e-mail konkrét javaslata alapján:
 5. Egy partnerhez (`Partner`) opcionálisan **több `PartnerUser`** is
    tartozhat (pl. bolt vezetője + helyettes) — ez nyitott kérdés, hogy a
    partnerek ezt kérik-e, ld. 18. fejezet.
+6. **Kezdeti jelszó kézbesítése** (2026.09.16-i kiegészítés — korábban
+   hiányzott): az adminisztrátor a Partnerek oldalon (ld. 16.13) létrehozza
+   a partnerkódot, a rendszer egy egyszer használatos, rövid érvényességű
+   linket küld a `PartnerUser.email` címre, amivel a partner első
+   belépéskor saját maga állítja be a jelszavát — a kezdeti jelszó
+   **soha nem megy ki nyílt szövegben** (sem e-mailben, sem telefonon).
+7. **Elfelejtett jelszó** (2026.09.16-i kiegészítés — korábban hiányzott):
+   a bejelentkezési képernyőn "Elfelejtett jelszó" link, ami a fenti,
+   e-mailes egyszer használatos linkes folyamatot indítja újra — nincs
+   emailben/telefonon kiadott jelszó-emlékeztető.
+8. **Felfüggesztett partner** (`Partner.status = suspended`,
+   2026.09.16-i kiegészítés — korábban hiányzott): a bejelentkezés
+   sikeres marad (a fiók nem törölt), de a rendelési felület helyett egy
+   egyértelmű üzenetet lát ("Fiókja jelenleg fel van függesztve, kérjük,
+   keresse kereskedelmi kapcsolattartóját"), rendelést nem tud leadni. A
+   már korábban leadott, még nem zárolt rendeléseit megtekintheti.
 
 ### 5.3 Fogyasztói panasz — nincs bejelentkezés
 
@@ -209,12 +226,27 @@ piszkozat (draft) → beküldve (submitted) → visszaigazolva (confirmed)
         │
         └──(elvetve)──> törölve (cancelled)
 
-visszaigazolva → ROOL-exportálva (rool_exported, ZÁROLT — nincs több módosítás)
+visszaigazolva → ROOL-exportálás megkísérelve → sikertelen (export_failed)
+                        │                              → belső riasztás (ld. 12.4)
+                        │                              → javítás után újrapróbálva
+                        ↓ (sikeres)
+                 ROOL-exportálva (rool_exported, ZÁROLT — nincs több módosítás)
                         │
                         ├──> teljesítve (fulfilled)
                         └──> részben teljesítve / elmaradt (partially_fulfilled / short)
                                    → termelési probléma e-mail a partnernek (ld. 10.3)
 ```
+
+**Ki kap értesítést módosításról/törlésről** (2026.09.16-i kiegészítés —
+korábban csak az `OrderAuditLog` rögzítette ezt, proaktív jelzés nem volt
+definiálva): ha a **belső kolléga** módosít vagy töröl egy `submitted`/
+`confirmed` rendelést, amit a **partner** adott le, a partner erről
+e-mailt kap (a visszaigazolás módosított-verziójaként, ill. törlésnél
+"a rendelését visszavontuk" szöveggel). Ha a **partner** módosítja a
+rendelést a cutoff közelében, a belső felület rendeléslistáján a sor
+"frissítve" jelzést kap, hogy az export előtt ellenőrizni érdemes — ez
+nem külön e-mail, hanem a Rendelés-részletező (16.10) és a napi export
+előkészítő nézet (ld. 12.2) figyelmeztetése.
 
 1. **`draft`** — a partner (vagy a nevében rögzítő belső kolléga, ld. 11.)
    éppen állítja össze a kosarat; ekkor még nincs sorszám, nincs zárolás.
@@ -364,6 +396,14 @@ validáció kényelmi funkció, nem biztonsági határ).
   > Következő elérhető szállítás: 2026.09.12.
   > Rendelés leadási határidő: 2026.09.11. 14:00
 
+- **Cutoff után leadott rendelés jelzése** (2026.09.16-i kiegészítés —
+  korábban a szabály megvolt, de a partnernek szóló üzenet nem volt
+  kimondva): ha a partner a napi cutoff után adja le a rendelést, ezt a
+  rendszer **nem hibaként**, hanem a visszaigazoláson (ld. 10.2)
+  explicit szöveggel jelzi: *"A mai leadási határidő lejárt, ezért a
+  rendelését a következő elérhető szállítási napra ütemeztük: 2026.09.18."*
+  — hogy a partner egyértelműen lássa, ez tudatos csúszás, nem hiba.
+
 ### 9.4 Termék nem rendelhető
 
 Ha egy terméket ideiglenesen kivontak a rendelhetők köréből
@@ -420,6 +460,34 @@ gyakorlat megtartása az eltérések esetére, a felhasználó kérésének
 megfelelően ("Lehessen visszajelezni, ha nem tudjuk rendezni a termelést és
 nem tudjuk kiszolgálni").
 
+### 10.4 A termelés/raktár rálátása a napi igényre (2026.09.16-i kiegészítés — nyitott döntési pont)
+
+A fenti folyamat feltételezi, hogy **"a belső kolléga"** tudja, mekkora
+mennyiséget lehet ténylegesen teljesíteni — de a jelenlegi tervezet nem
+mondja ki, **honnan** jut el ez az infó a termeléshez/raktárhoz, és
+**hogyan** jön vissza onnan az ügyfélszolgálathoz. Enélkül visszaáll az a
+kézi lánc, amit a projekt épp ki akar váltani (valaki kinyomtatja/
+átmondja a rendeléseket a termelésnek, majd szóban/papíron jön vissza a
+válasz). Ez a jelenlegi terv **legfontosabb nyitott pontja** — döntést
+igényel, mielőtt a fejlesztés elindulna:
+
+- **Javasolt v1-megoldás** (a projekt konzervatív, fájl-/e-mail-alapú
+  mintázatához illeszkedve, ld. 3. fejezet): a cutoff lejártával, az
+  exporttal egy időben a rendszer **automatikusan összeállít és kiküld
+  egy napi, termékenként összesített igénylistát** (mennyi kell
+  összesen egy adott szállítási napra, partnerenkénti bontás nélkül)
+  egy beállítható belső címre (pl. `termeles@merian.hu`) — ugyanaz a
+  "kézzel karbantartott/generált riport" elv, mint a ROOL export.
+- **Alternatíva** (nagyobb beruházás, később is bevezethető): egy
+  dedikált, egyszerű `termeles`/`raktar` szerepkör, ami csak ezt az
+  összesítő nézetet látja a portálon, és soronként vissza tudja írni,
+  mennyi teljesíthető — ez váltaná ki a fenti e-mailes kört, és
+  megszüntetné, hogy az ügyfélszolgálatnak kelljen közvetítenie a
+  termelés és a rendszer között.
+- **Ezt a döntést a felhasználónak/a céggel egyeztetve kell meghozni** —
+  a dokumentum egyelőre a v1-megoldást (napi összesítő e-mail) javasolja
+  alapértelmezésként, de ez explicit megerősítést igényel.
+
 ## 11. Kézi rögzítés (belső felhasználók)
 
 Az ügyfélszolgálati/kereskedelmi szerepkör a **partnerekével azonos
@@ -447,7 +515,12 @@ fejezet `OrderLine` mezői) kerülnek bele.
 Javaslat: **napi, cutoff time utáni ütemezett export** (Cloud Scheduler),
 plusz egy "Exportálás most" gomb az adminisztrációs felületen sürgős esetre
 — ugyanaz a manuális-indítású minta, mint a testvérprojekt referencia-cache
-frissítésénél.
+frissítésénél. **Felelős** (2026.09.16-i kiegészítés — korábban nem volt
+kimondva): az export elindítása/ellenőrzése adminisztrátori feladat — ez
+váltja ki a jelenlegi folyamatban a ROOL-rögzítést végző kolléga (Virág)
+szerepét erre a lépésre nézve; az ütemezett export mellett minden nap
+valakinek ellenőriznie kell, hogy lefutott-e és nem maradt-e
+`export_failed` állapotú rendelés (ld. 12.4).
 
 ### 12.3 Zárolás
 
@@ -456,6 +529,26 @@ kerülnek, és **a portálon többé nem szerkeszthetők** — ez a felhasznál�
 explicit szabálya ("Amikor átkerül a ROOL-ba utána nem lehet módosítani").
 A UI ilyenkor egy "Zárolva — feldolgozás alatt a ROOL-ban" jelzést mutat, a
 mezők csak olvashatók.
+
+### 12.4 Sikertelen export (2026.09.16-i kiegészítés — korábban hiányzott)
+
+A korábbi tervezet nem foglalkozott azzal, mi történik, ha az export
+sikertelen (pl. a ROOL elutasít egy sort, vagy a fájl nem tölthető fel).
+Javasolt kezelés — a testvérprojekt (Billingo→IMA) hasonló mintáját
+követve (`docs/tervezes.md` 6. fejezet, `failed` állapot):
+
+- Sikertelen exportnál az érintett rendelés(ek) **`export_failed`**
+  állapotba kerülnek — **nem** `rool_exported`, tehát **még
+  szerkeszthetők maradnak**, amíg a hiba nem javult.
+- Az adminisztrációs felületen (Riportok/Export napló) jól látható
+  hibalista jelzi, mely rendelés miért nem ment át — hasonlóan az
+  admin termék-/árlista importhoz (ld. 7.3, 16.11).
+- A felelős adminisztrátor (ld. 12.2) minden `export_failed` rendelésről
+  automatikus, napi összesítő értesítést kap, amíg a hiba fennáll —
+  hogy egy elakadt rendelés ne maradjon észrevétlenül a következő
+  cutoff-ig.
+- Javítás után a rendelés újra bekerül a következő export-körbe
+  (kézi "Exportálás most" gombbal is azonnal).
 
 ## 13. Riportálás
 
@@ -517,13 +610,69 @@ fejezet `Complaint` entitás):
 - Szabad szöveges, limitált karakterszámú probléma-leírás.
 - Fénykép / blokk / számla feltöltése.
 
-### 15.3 Belső feldolgozás
+### 15.3 Beküldés utáni folyamat (2026.09.16-i pontosítás)
 
-Mindkét típusú bejelentés egy közös **panaszkezelési munkasorba** kerül
-(ügyfélszolgálati/adminisztrátori felület, ld. 16.9): állapot (`new`/
-`in_progress`/`resolved`/`rejected`), felelős kijelölése, válasz/indoklás
-rögzítése. A B2B panasz a partner-részletezőn is megjelenik (ld. 14.
-fejezet).
+Zádori Jácint 2026.09.16-i válasza Szécsi Borbála kérdésére ("a
+panaszkezelési rész nálunk belső oldalon hogy fog kinézni? Beérkezik
+e-mailben? Vagy a ROOL-ba tölt be?") pontosan rögzíti a folyamatot:
+
+1. A partner kiválasztja, melyik rendeléshez kapcsolódik a panasza
+   (opcionálisan, ld. 15.1), megadja a panasz tartalmát, majd elküldi.
+2. Beküldés után **azonnal, a felületen visszajelzést kap arról, mennyi
+   idő alatt várható válasz** (pl. "3 munkanapon belül jelentkezünk") —
+   ld. 15.4.
+3. A beérkezett panaszról a rendszer **e-mail értesítést küld egy
+   előre beállított, belső címre** (pl. `panasz@merian.hu`) — ez
+   kizárólag ÉRTESÍTÉS. **A panasz nem a ROOL-ba tölt be, és a tényleges
+   kezelés nem e-mailben történik** — a panasz a portál panaszkezelési
+   felületén marad nyilvántartva és onnan kezelendő.
+4. A belső felületen a kijelölt kolléga látja a panasz teljes tartalmát
+   (kategória, leírás, csatolt fotó, kapcsolódó rendelés/vásárlás
+   adatai), és:
+   - **kijelöli, ki fogja kezelni** (felelős kolléga),
+   - **határidőt ad a kezelésre**.
+5. A panasz a felületen marad, **státusszal**:
+   - `new` — új, még nem foglalkoztak vele
+   - `in_progress` — feldolgozás alatt
+   - `awaiting_customer` — válaszra vár (az ügyféltől további infó
+     szükséges)
+   - `resolved` — megoldva / lezárva
+   - `rejected` — elutasítva (indoklással)
+
+   A kijelölt felelős **minden állapotváltozásról és a határidő
+   közeledtéről/lejártáról értesítést kap.**
+6. Az ügyfél (partner) a folyamat végén visszajelzést kap a megoldásról.
+
+Ez kiegészíti a 4. fejezet `Complaint` entitását az alábbi mezőkkel:
+`assignedToId` (felelős belső user), `responseDueAt` (a felelős által
+megadott határidő), `promisedResponseText` (a partnernek mutatott
+"mikor jelzünk vissza" szöveg, ld. 15.4), és egy külön
+**`ComplaintStatusLog`** tábla (`complaintId`, `status`, `changedById`,
+`note`, `createdAt`) — ki, mikor, milyen státuszra állította a
+panaszt, az `OrderAuditLog`-hoz hasonló mintában. A belső értesítési
+cím (`panasz@merian.hu`) cégszinten, adminisztrátor által
+konfigurálható beállítás (nem kódba égetett érték).
+
+### 15.4 Partner-oldali visszajelzés a beküldéskor
+
+A panasz beküldése után a partner (vagy a fogyasztói panasz esetén a
+bejelentő) azonnal egy megerősítő képernyőt lát — hasonló felépítéssel,
+mint a rendelés-visszaigazolás (ld. 10.2) —, ami tartalmazza:
+
+- a panasz azonosítóját,
+- a vállalt válaszidőt (pl. "3 munkanapon belül jelentkezünk"; a
+  konkrét időtáv admin oldalon, panasz-kategóriánként állítható be),
+- megerősítést, hogy a bejelentés megérkezett és rögzítésre került.
+
+Ugyanez a szöveg e-mailben is kimegy a bejelentőnek, a rendelés-
+visszaigazoló e-mail (ld. 10.2) mintájára.
+
+### 15.5 Munkasor és a B2B panasz kapcsolata a partnerrel
+
+Mindkét típusú bejelentés (B2B partner panasz és fogyasztói panasz)
+egy közös **panaszkezelési munkasorba** kerül (belső, ügyfélszolgálati/
+adminisztrátori felület, ld. 16.15). A B2B panasz a partner-részletezőn
+is megjelenik (ld. 14. fejezet).
 
 ## 16. UI tervezés (képernyők)
 
@@ -549,7 +698,9 @@ fejezet).
    dátum, tételek, "Rendelés módosítása" gomb (amíg nem zárolt).
 6. **Rendeléseim** (partner) — rendeléstörténet státusz szerint szűrve,
    részletező nézettel.
-7. **Reklamáció/panasz beküldése** — a 15. fejezet szerinti két űrlap.
+7. **Reklamáció/panasz beküldése** — a 15. fejezet szerinti két űrlap,
+   beküldés után egy megerősítő képernyővel (panaszazonosító + vállalt
+   válaszidő, ld. 15.4).
 8. **Ügyfélkezelés / partnerek** (belső) — partnerlista kereséssel/szűréssel,
    partner-részletező (törzsadat + kapcsolattartók + rendeléstörténet +
    panasztörténet + belső jegyzet).
@@ -565,7 +716,19 @@ fejezet).
 13. **Adminisztráció — partnerek/belépési adatok** — partnerkód/jelszó
     kiosztás, aktiválás/felfüggesztés.
 14. **Riportok** — a 13. fejezet szerinti listák és exportok.
-15. **Panaszkezelési munkasor** (belső) — a 15.3 szerinti állapotkezelés.
+15. **Panaszkezelési munkasor** (belső) — lista nézet (panaszazonosító,
+    partner/bejelentő, kategória, kapcsolódó rendelés, beérkezés
+    dátuma, felelős, határidő, státusz — ld. 15.3), szűrhető státusz és
+    felelős szerint. Részletező nézetben a teljes panasztartalom (leírás,
+    csatolt fotó, kapcsolódó rendelés adatai), a felelős kijelölése és a
+    határidő megadása, státuszváltás, valamint az ügyfélnek küldött
+    válasz rögzítése. A panasz beérkezéséről kimenő belső e-mail
+    értesítés címe (pl. `panasz@merian.hu`) admin oldalon
+    konfigurálható (ld. 16. pont, Beállítások).
+16. **Beállítások** (belső, adminisztrátor) — cégszintű, admin által
+    karbantartott konfiguráció: panasz-értesítési e-mail cím, panasz-
+    kategóriánkénti vállalt válaszidő (ld. 15.4), rendelési cutoff time,
+    egyéb rendszerszintű beállítások.
 
 ## 17. GCP telepítés és domain
 
@@ -637,3 +800,67 @@ Excel-sablon" ötletet, ha a 2. fázis (webes rendelés) csúszna.
   egyeztetve, hogy van-e ténylegesen nem-HUF rendelő partner, és ha igen,
   kell-e árfolyam-kezelés (a testvérprojekt már tartalmaz ehhez hasonló
   logikát a számlaoldalon, átvehető minta, ha szükséges).
+- **Termelés/raktár hozzáférése a napi igényhez** (2026.09.16-i kiegészítés)
+  — a legfontosabb nyitott döntés, ld. 10.4: napi összesítő e-mail (v1) vagy
+  dedikált belső szerepkör/felület.
+- **`fulfilled`/`partially_fulfilled`/`short` státusz pontos gazdája**
+  (2026.09.16-i kiegészítés) — mivel v1-ben nincs élő ROOL-visszaolvasás
+  (ld. 3. fejezet), ezt egy belső kollégának kézzel kell frissítenie a
+  tényleges szállítás/teljesítés alapján; a 10.4-ben javasolt
+  termelési-összesítő e-mail felelőse és e státusz frissítője lehet
+  ugyanaz a szerepkör — ezt a fejlesztés megkezdése előtt tisztázni kell.
+- **Vezetői riport-hozzáférés v1-ben** (2026.09.16-i kiegészítés) — a 2.
+  fejezet szerint ez 2. fázisra halasztott; v1-ben a vezetőség csak
+  adminisztrátori kézi exporttal (ld. 13. fejezet) jut riporthoz. Ha ez
+  nem elegendő induláskor, a "Vezetői / riport nézet" szerepkört érdemes
+  előrehozni az 1. fázisba (ld. 18. fejezet).
+- **Kapcsolat a meglévő Billingo→IMA számlázási integrációval** (2026.09.16-i
+  kiegészítés) — ugyanennek a cégcsoportnak már van egy működő kimenő
+  számla-integrációja (ld. ugyanebben a repóban `docs/tervezes.md`). Jelen
+  dokumentum nem tervezi meg, hogy a teljesített rendelésből (`fulfilled`)
+  hogyan lesz Billingo-számla — feltehetően a ROOL-on belül, a VMS-szám
+  alapján történik, de ezt érdemes explicit megerősíteni, nehogy a két
+  rendszer között adatrés maradjon.
+
+## 20. Zártsági és tájékoztatási ellenőrzés (2026.09.16)
+
+A felhasználó kérésére végigmentünk a teljes rendelési folyamaton három
+szempontból: zárt-e a rendszer (nincs kezeletlen ág), minden belső
+szerepkör megkapja-e a szükséges infót, és a partnerek megfelelően
+tájékoztatva vannak-e. Az alábbi hiányosságokat találtuk és **javítottuk
+ebben a dokumentumban** (a fenti fejezetek már a javított állapotot
+mutatják):
+
+| # | Talált hiányosság | Javítás helye |
+|---|---|---|
+| 1 | Sikertelen ROOL-export esetére nem volt kezelt állapot/felelős | 12.4 (új `export_failed` állapot, riasztás) |
+| 2 | Nem volt szabály, ki kap értesítést, ha a **másik fél** módosítja/törli a rendelést | 6. fejezet (új bekezdés) |
+| 3 | Cutoff utáni leadásnál nem volt kimondva, milyen üzenetet lát a partner | 9.3 (explicit visszaigazoló szöveg) |
+| 4 | Elfelejtett jelszó és a kezdeti jelszó kézbesítési módja nem volt megtervezve | 5.2 (6–7. pont) |
+| 5 | Felfüggesztett partner (`suspended`) UX nem volt leírva | 5.2 (8. pont) |
+| 6 | Nem volt egyértelmű, ki indítja/ellenőrzi a ROOL exportot | 12.2 (felelősség kimondva) |
+
+**Egy pontban nem tudtunk dönteni helyetted, mert ez üzleti döntés, nem
+tervezési kérdés:** a **termelés/raktár rálátása a napi rendelési
+igényre** (ld. 10.4) — jelenleg a terv feltételezi, hogy "a belső
+kolléga" tudja, mennyi teljesíthető, de nincs kimondva, honnan jut ez el
+hozzá. Egy alapértelmezett (napi összesítő e-mail) javaslatot tettünk,
+de ezt jóvá kell hagynod, különben ezen a ponton visszamarad a kézi
+lánc, amit a rendszer ki akar váltani.
+
+**Válasz a három konkrét kérdésre:**
+
+- **"Zárt a rendszer?"** — A fő útvonalon (leadás → visszaigazolás →
+  export → teljesítés) igen, minden ág kezelt, beleértve mostantól a
+  sikertelen exportot és a törlést/módosítást is. A 10.4-ben jelzett
+  termelési visszacsatolás az egyetlen pont, ahol a "zártság" egy külső,
+  még el nem döntött folyamattól függ.
+- **"Minden kolléga kap infót?"** — Az ügyfélszolgálat és az
+  adminisztrátor igen (rendeléslista, export-hiba riasztás, panasz-
+  értesítés és -határidő). A **termelés/raktár** infóellátása nyitott
+  (ld. fent), és a **vezetőség** v1-ben csak kézi exporttal fér hozzá
+  riporthoz (ld. 19. fejezet) — ha ez nem elég, szólj, és előrehozzuk.
+- **"A partnerek megfelelő infóval el vannak látva?"** — Igen, minden
+  fő ponton (belépés utáni állapot, mennyiségi validáció, visszaigazolás,
+  termelési eltérés, panasz-visszajelzés), és most már a cutoff utáni
+  csúszásról és a fiókfelfüggesztésről is.
