@@ -93,6 +93,7 @@ export default async function CompanySettingsPage({ params }: { params: { compan
           billingoVatValue: m.billingoVatValue,
           imaVatCode: m.imaVatCode,
           note: m.note,
+          isReverseCharge: m.isReverseCharge,
         }))}
       />
       <PaymentMethodMappingSettings

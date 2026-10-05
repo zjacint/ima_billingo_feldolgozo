@@ -25,6 +25,12 @@ export interface BillingoDocumentPartner {
   billingoPartnerId: string;
   name: string;
   taxNumber: string | null;
+  /**
+   * Billingo `tax_type` mezője (`"" | "FOREIGN" | "HAS_TAX_NUMBER" |
+   * "NO_TAX_NUMBER"`) — a partner EXPLICIT besorolása vállalkozás/
+   * külföldi/magánszemély szerint, ld. docs/tervezes.md 25. fejezet.
+   */
+  taxType: string | null;
   postalCode: string | null;
   city: string | null;
   addressStreet: string | null;
@@ -42,6 +48,17 @@ export interface BillingoDocument {
   fulfillmentDate: string | null;
   dueDate: string | null;
   grossTotal: number;
+  /**
+   * A dokumentum fejléc-szintű nettó/áfa összesítője (`summary.net_amount`/
+   * `summary.vat_amount`) — ld. docs/tervezes.md 21. fejezet, könyvelői
+   * pontosítás (2026.09.14): "a fejléc adatával kell azonosnak lenni a
+   * soroknak... az összesen adat, ami a számla fejből érkezik, az a fix."
+   * `null`, ha a Billingo válasz valamiért nem tartalmazza a `summary`
+   * objektumot (nem várt, de defenzíven kezelve) — ilyenkor a hívó a
+   * tételsorok összegére esik vissza.
+   */
+  netTotal: number | null;
+  vatTotal: number | null;
   paymentMethod: string;
   /** A számla fejléc-szintű megjegyzése — a `commentPattern` szabályok (is) illesztik. */
   comment: string | null;
@@ -49,6 +66,15 @@ export interface BillingoDocument {
   items: BillingoDocumentItem[];
   /** Van-e kapcsolódó (elszámolt) előlegszámla — ld. `mapDocument`. */
   hasRelatedDocuments: boolean;
+  /**
+   * A `related_documents` tömb (`DocumentAncestor` séma: `{id,
+   * invoice_number}`) elemeinek Billingo dokumentum-azonosítói — ld.
+   * docs/tervezes.md 24. fejezet. Ez teszi lehetővé, hogy egy stornó/
+   * helyesbítő/végszámla vissza tudjon keresni a KONKRÉT eredeti
+   * bizonylatra (`Invoice.billingoDocumentId`), nem csak azt tudja, hogy
+   * VAN kapcsolódó bizonylat.
+   */
+  relatedDocumentIds: string[];
 }
 
 /**
@@ -139,6 +165,7 @@ function mapPartner(raw: Record<string, unknown> | null | undefined): BillingoDo
     billingoPartnerId: String(raw.id ?? ""),
     name: String(raw.name ?? ""),
     taxNumber: raw.taxcode ? String(raw.taxcode) : null,
+    taxType: raw.tax_type ? String(raw.tax_type) : null,
     postalCode: address.post_code ? String(address.post_code) : null,
     city: address.city ? String(address.city) : null,
     addressStreet: address.address ? String(address.address) : null,
@@ -164,6 +191,7 @@ function mapDocument(raw: Record<string, unknown>): BillingoDocument {
   // `document_partner` a jelenlegi mező, a `partner` deprecated — ha az API
   // válasza csak az utóbbit adja (régebbi integráció), arra esünk vissza.
   const partnerRaw = (raw.document_partner ?? raw.partner) as Record<string, unknown> | undefined;
+  const summaryRaw = raw.summary as Record<string, unknown> | undefined;
   return {
     id: String(raw.id ?? ""),
     invoiceNumber: String(raw.invoice_number ?? ""),
@@ -175,6 +203,8 @@ function mapDocument(raw: Record<string, unknown>): BillingoDocument {
     fulfillmentDate: raw.fulfillment_date ? String(raw.fulfillment_date) : null,
     dueDate: raw.due_date ? String(raw.due_date) : null,
     grossTotal: Number(raw.gross_total ?? 0),
+    netTotal: summaryRaw?.net_amount != null ? Number(summaryRaw.net_amount) : null,
+    vatTotal: summaryRaw?.vat_amount != null ? Number(summaryRaw.vat_amount) : null,
     paymentMethod: String(raw.payment_method ?? "other"),
     comment: raw.comment ? String(raw.comment) : null,
     partner: mapPartner(partnerRaw),
@@ -183,6 +213,12 @@ function mapDocument(raw: Record<string, unknown>): BillingoDocument {
     // korábbi előlegszámlát számol el ("végszámla") — ld. docs/tervezes.md
     // 7. fejezet.
     hasRelatedDocuments: Array.isArray(raw.related_documents) && raw.related_documents.length > 0,
+    relatedDocumentIds: Array.isArray(raw.related_documents)
+      ? raw.related_documents
+          .map((d) => (d as Record<string, unknown>)?.id)
+          .filter((id): id is string | number => id != null)
+          .map((id) => String(id))
+      : [],
   };
 }
 

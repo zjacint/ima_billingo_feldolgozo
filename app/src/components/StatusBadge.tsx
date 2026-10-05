@@ -47,6 +47,8 @@ const MAPPING_RULE_SOURCE_LABEL: Record<string, string> = {
   learned_invoiceanalytics: "Tanult",
   vat_mapping: "Áfa megfeleltetés",
   advance_reference: "Előleg",
+  cancellation_reference: "Stornó öröklés",
+  modification_reference: "Helyesbítő öröklés",
 };
 
 export function MappingRuleSourceBadge({ source }: { source: string }) {

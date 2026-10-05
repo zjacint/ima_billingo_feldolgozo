@@ -1,11 +1,32 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { InvoiceStatusBadge } from "@/components/StatusBadge";
 import CodeNameCombobox, { type CodeNameOption } from "@/components/CodeNameCombobox";
 import Spinner from "@/components/Spinner";
+
+/**
+ * A számlaszám és a művelet-oszlop mindig látszik — a többi (opcionális)
+ * oszlop ki/bekapcsolható, könyvelői kérés (2026.09.17): "a számlákat
+ * mutató lapon lehessen beállítani, hogy milyen oszlopokat akarunk
+ * látni." Csak a NÉZŐ böngészőjében tárolt beállítás (localStorage), nem
+ * megosztott/szerver-oldali adat — nem befolyásolja, mit lát más
+ * felhasználó.
+ */
+const OPTIONAL_COLUMNS = [
+  { key: "partnerName", label: "Partner" },
+  { key: "fulfillmentDate", label: "Teljesítés dátuma" },
+  { key: "netAmount", label: "Nettó" },
+  { key: "vatAmount", label: "Áfa" },
+  { key: "grossAmount", label: "Bruttó" },
+  { key: "invoiceKind", label: "Típus" },
+  { key: "currencyCode", label: "Devizanem" },
+  { key: "status", label: "Státusz" },
+] as const;
+type OptionalColumnKey = (typeof OPTIONAL_COLUMNS)[number]["key"];
+const VISIBLE_COLUMNS_STORAGE_KEY = "billingoIma.invoiceList.visibleColumns";
 
 export interface InvoiceRow {
   id: string;
@@ -202,12 +223,15 @@ export default function InvoiceListTable({
   glaAccountOptions,
   vatKeyOptions,
   ruleOptions,
+  returnTo,
 }: {
   companyId: string;
   invoices: InvoiceRow[];
   glaAccountOptions: CodeNameOption[];
   vatKeyOptions: CodeNameOption[];
   ruleOptions: RuleOption[];
+  /** A jelenlegi szűrő/lapozás URL-je — a számla-részletező "← Számlák" linkje ide tér vissza. */
+  returnTo: string;
 }) {
   const router = useRouter();
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -215,6 +239,40 @@ export default function InvoiceListTable({
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showBulkMapping, setShowBulkMapping] = useState(false);
+  const [visibleColumns, setVisibleColumns] = useState<Set<OptionalColumnKey>>(
+    new Set(OPTIONAL_COLUMNS.map((c) => c.key))
+  );
+  const [showColumnPicker, setShowColumnPicker] = useState(false);
+
+  // Böngészőnkénti beállítás betöltése — hiba/hiányzó adat esetén az
+  // összes oszlop marad látható (fenti alapérték).
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(VISIBLE_COLUMNS_STORAGE_KEY);
+      if (!raw) return;
+      const parsed: unknown = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const valid = new Set(OPTIONAL_COLUMNS.map((c) => c.key));
+        setVisibleColumns(new Set(parsed.filter((k): k is OptionalColumnKey => valid.has(k))));
+      }
+    } catch {
+      // marad az alapértelmezett (összes látható)
+    }
+  }, []);
+
+  function toggleColumn(key: OptionalColumnKey) {
+    setVisibleColumns((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      try {
+        window.localStorage.setItem(VISIBLE_COLUMNS_STORAGE_KEY, JSON.stringify([...next]));
+      } catch {
+        // ha nem érhető el a localStorage (pl. privát böngészés), csak ennyi munkamenetre érvényes
+      }
+      return next;
+    });
+  }
 
   const selectableForApprove = invoices.filter((i) => i.status === "synced" || i.status === "needs_review");
   const selectableForSubmit = invoices.filter((i) => i.status === "approved" || i.status === "failed");
@@ -421,6 +479,36 @@ export default function InvoiceListTable({
         >
           Kontír/áfa beállítása ({selectedForMapping.length})
         </button>
+        <span style={{ position: "relative" }}>
+          <button className="btn btn-sm" onClick={() => setShowColumnPicker((v) => !v)}>
+            Oszlopok
+          </button>
+          {showColumnPicker && (
+            <div
+              className="card stack"
+              style={{
+                position: "absolute",
+                top: "100%",
+                right: 0,
+                zIndex: 10,
+                marginTop: "0.25rem",
+                minWidth: 220,
+                boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+              }}
+            >
+              {OPTIONAL_COLUMNS.map((col) => (
+                <label key={col.key} className="cluster" style={{ fontSize: "0.9rem" }}>
+                  <input
+                    type="checkbox"
+                    checked={visibleColumns.has(col.key)}
+                    onChange={() => toggleColumn(col.key)}
+                  />
+                  {col.label}
+                </label>
+              ))}
+            </div>
+          )}
+        </span>
       </div>
       <p className="text-sm muted" style={{ margin: 0 }}>
         A &bdquo;Kontír/áfa beállítása&rdquo; a kijelölt, még be nem küldött számlák MINDEN
@@ -451,14 +539,14 @@ export default function InvoiceListTable({
                 />
               </th>
               <th>Számlaszám</th>
-              <th>Partner</th>
-              <th>Teljesítés dátuma</th>
-              <th>Nettó</th>
-              <th>Áfa</th>
-              <th>Bruttó</th>
-              <th>Típus</th>
-              <th>Devizanem</th>
-              <th>Státusz</th>
+              {visibleColumns.has("partnerName") && <th>Partner</th>}
+              {visibleColumns.has("fulfillmentDate") && <th>Teljesítés dátuma</th>}
+              {visibleColumns.has("netAmount") && <th>Nettó</th>}
+              {visibleColumns.has("vatAmount") && <th>Áfa</th>}
+              {visibleColumns.has("grossAmount") && <th>Bruttó</th>}
+              {visibleColumns.has("invoiceKind") && <th>Típus</th>}
+              {visibleColumns.has("currencyCode") && <th>Devizanem</th>}
+              {visibleColumns.has("status") && <th>Státusz</th>}
               <th></th>
             </tr>
           </thead>
@@ -469,33 +557,46 @@ export default function InvoiceListTable({
                   <input type="checkbox" checked={selected.has(inv.id)} onChange={() => toggle(inv.id)} />
                 </td>
                 <td>{inv.billingoDocumentNumber}</td>
-                <td>{inv.partnerName ?? "—"}</td>
-                <td>{inv.fulfillmentDate ? new Date(inv.fulfillmentDate).toLocaleDateString("hu-HU") : "—"}</td>
-                <td>{inv.netAmount != null ? inv.netAmount.toLocaleString("hu-HU") : "—"}</td>
-                <td>{inv.vatAmount != null ? inv.vatAmount.toLocaleString("hu-HU") : "—"}</td>
-                <td>{inv.grossAmount != null ? inv.grossAmount.toLocaleString("hu-HU") : "—"}</td>
-                <td>{inv.invoiceKind}</td>
-                <td>{inv.currencyCode}</td>
+                {visibleColumns.has("partnerName") && <td>{inv.partnerName ?? "—"}</td>}
+                {visibleColumns.has("fulfillmentDate") && (
+                  <td>{inv.fulfillmentDate ? new Date(inv.fulfillmentDate).toLocaleDateString("hu-HU") : "—"}</td>
+                )}
+                {visibleColumns.has("netAmount") && (
+                  <td>{inv.netAmount != null ? inv.netAmount.toLocaleString("hu-HU") : "—"}</td>
+                )}
+                {visibleColumns.has("vatAmount") && (
+                  <td>{inv.vatAmount != null ? inv.vatAmount.toLocaleString("hu-HU") : "—"}</td>
+                )}
+                {visibleColumns.has("grossAmount") && (
+                  <td>{inv.grossAmount != null ? inv.grossAmount.toLocaleString("hu-HU") : "—"}</td>
+                )}
+                {visibleColumns.has("invoiceKind") && <td>{inv.invoiceKind}</td>}
+                {visibleColumns.has("currencyCode") && <td>{inv.currencyCode}</td>}
+                {visibleColumns.has("status") && (
+                  <td>
+                    <InvoiceStatusBadge status={inv.status} />
+                    {inv.billingoCancelled && (
+                      <div className="text-sm" style={{ color: "var(--color-danger)", marginTop: "0.2rem" }}>
+                        Törölve Billingo-ban
+                      </div>
+                    )}
+                    {inv.status === "rejected" && inv.rejectionReason && (
+                      <div className="muted text-sm" style={{ marginTop: "0.2rem" }}>
+                        {inv.rejectionReason}
+                      </div>
+                    )}
+                    {inv.exchangeRateWarning && (
+                      <div className="text-sm" style={{ color: "var(--color-warning)", marginTop: "0.2rem" }}>
+                        ⚠ {inv.exchangeRateWarning}
+                      </div>
+                    )}
+                  </td>
+                )}
                 <td>
-                  <InvoiceStatusBadge status={inv.status} />
-                  {inv.billingoCancelled && (
-                    <div className="text-sm" style={{ color: "var(--color-danger)", marginTop: "0.2rem" }}>
-                      Törölve Billingo-ban
-                    </div>
-                  )}
-                  {inv.status === "rejected" && inv.rejectionReason && (
-                    <div className="muted text-sm" style={{ marginTop: "0.2rem" }}>
-                      {inv.rejectionReason}
-                    </div>
-                  )}
-                  {inv.exchangeRateWarning && (
-                    <div className="text-sm" style={{ color: "var(--color-warning)", marginTop: "0.2rem" }}>
-                      ⚠ {inv.exchangeRateWarning}
-                    </div>
-                  )}
-                </td>
-                <td>
-                  <Link href={`/dashboard/${companyId}/invoices/${inv.id}`} className="btn btn-sm">
+                  <Link
+                    href={`/dashboard/${companyId}/invoices/${inv.id}?returnTo=${encodeURIComponent(returnTo)}`}
+                    className="btn btn-sm"
+                  >
                     Megnyitás
                   </Link>
                 </td>
@@ -503,7 +604,7 @@ export default function InvoiceListTable({
             ))}
             {invoices.length === 0 && (
               <tr>
-                <td colSpan={11} className="muted">
+                <td colSpan={3 + visibleColumns.size} className="muted">
                   Nincs a szűrésnek megfelelő számla.
                 </td>
               </tr>

@@ -20,6 +20,7 @@
 
 import { InvoiceStatus } from "@prisma/client";
 import { prisma } from "./db";
+import { isPartnerPrivateIndividual } from "./types";
 
 export const OSS_THRESHOLD_HUF = 3_100_000;
 
@@ -33,14 +34,21 @@ export const EU_MEMBER_COUNTRY_CODES_EXCL_HU = new Set([
  * OSS-érintett (küszöbbe beleszámító) partner: külföldi EU tagállami,
  * közösségi adószám NÉLKÜLI magánszemély — ld. könyvelői megerősítés: "a
  * B2B vevő esetén a közösségi adószám megléte... jelzi, hogy nem kell az
- * OSS értékhatárba beszámítani". Az adószám hiánya (ugyanaz a jel, mint a
- * meglévő magánszemély-párosításnál, ld. partners/auto-match) jelöli a
- * magánszemélyt (B2C).
+ * OSS értékhatárba beszámítani". A magánszemély-besoroláshoz a Billingo
+ * `tax_type` EXPLICIT jelzését használja (`isPartnerPrivateIndividual`,
+ * ld. types.ts, docs/tervezes.md 25. fejezet) — NEM pusztán az adószám
+ * hiányából következtet, mert egy külföldi VÁLLALKOZÁSNÁL a hiányzó
+ * adószám lehet egyszerű Billingo-oldali adathiány is, nem feltétlenül
+ * magánszemély (ez tévesen az OSS-küszöbbe számítaná be egy B2B számlát).
  */
-export function isOssRelevantPartner(partner: { countryCode: string | null; taxNumber: string | null }): boolean {
+export function isOssRelevantPartner(partner: {
+  countryCode: string | null;
+  taxNumber: string | null;
+  taxType?: string | null;
+}): boolean {
   if (!partner.countryCode) return false;
   if (!EU_MEMBER_COUNTRY_CODES_EXCL_HU.has(partner.countryCode.toUpperCase())) return false;
-  return !partner.taxNumber;
+  return isPartnerPrivateIndividual(partner);
 }
 
 /** A tényleges kiállítás alapján számít — az elutasított (könyvelőileg kizárt) számlák nem számítanak bele. */

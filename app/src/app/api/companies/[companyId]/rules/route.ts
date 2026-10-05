@@ -25,6 +25,7 @@ const schema = z.object({
   commentPattern: z.string().nullable().optional(),
   documentTypePattern: z.string().nullable().optional(),
   vatPattern: z.string().nullable().optional(),
+  amountSignPattern: z.enum(["positive", "negative"]).nullable().optional(),
   glaCode: z.string().min(1),
   vatCode: z.string().min(1),
   vatGlaCode: z.string().nullable().optional(),
@@ -49,6 +50,15 @@ export async function POST(req: Request, { params }: { params: { companyId: stri
         { status: 400 }
       );
     }
+    // Az előjel-feltétel önmagában túl tág lenne (minden pozitív/negatív
+    // sorra illeszkedne) — csak egy másik feltétel MELLETT engedjük, ld.
+    // docs/tervezes.md 24. fejezet, 2026.09.18-i kiegészítés.
+    if (d.amountSignPattern && !d.partnerId && !d.productNamePattern && !d.commentPattern && !d.vatPattern) {
+      return NextResponse.json(
+        { error: "Az előjel-feltétel önmagában nem elég — adj meg mellé partnert, terméket, megjegyzést vagy áfa mintát is." },
+        { status: 400 }
+      );
+    }
     const rule = await prisma.mappingRule.create({
       data: {
         companyId: params.companyId,
@@ -57,6 +67,7 @@ export async function POST(req: Request, { params }: { params: { companyId: stri
         commentPattern: d.commentPattern ?? null,
         documentTypePattern: d.documentTypePattern ?? null,
         vatPattern: d.vatPattern ?? null,
+        amountSignPattern: d.amountSignPattern ?? null,
         glaCode: d.glaCode,
         vatCode: d.vatCode,
         vatGlaCode: d.vatGlaCode ?? null,

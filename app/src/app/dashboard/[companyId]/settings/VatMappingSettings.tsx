@@ -9,6 +9,8 @@ interface VatMappingRow {
   billingoVatValue: string;
   imaVatCode: string;
   note: string | null;
+  /** ld. docs/tervezes.md 19. fejezet — a `invoiceCompliance.ts` figyelmeztetései ehhez a jelzőhöz kötöttek. */
+  isReverseCharge: boolean;
 }
 
 /**
@@ -91,6 +93,7 @@ export default function VatMappingSettings({
   const [billingoVatValue, setBillingoVatValue] = useState("");
   const [imaVatCode, setImaVatCode] = useState("");
   const [note, setNote] = useState("");
+  const [isReverseCharge, setIsReverseCharge] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -101,13 +104,14 @@ export default function VatMappingSettings({
       const res = await fetch(`/api/companies/${companyId}/vat-mappings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ billingoVatValue, imaVatCode, note: note || null }),
+        body: JSON.stringify({ billingoVatValue, imaVatCode, note: note || null, isReverseCharge }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.error ?? `Sikertelen létrehozás (${res.status})`);
       setBillingoVatValue("");
       setImaVatCode("");
       setNote("");
+      setIsReverseCharge(false);
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Ismeretlen hiba történt.");
@@ -165,6 +169,10 @@ export default function VatMappingSettings({
           Megjegyzés (opcionális)
           <input type="text" value={note} onChange={(e) => setNote(e.target.value)} />
         </label>
+        <label className="cluster" style={{ fontWeight: 600, fontSize: "0.9rem", alignItems: "center" }}>
+          <input type="checkbox" checked={isReverseCharge} onChange={(e) => setIsReverseCharge(e.target.checked)} />
+          Fordított áfás kulcs
+        </label>
       </div>
       {error && <p className="alert alert-error">{error}</p>}
       <div>
@@ -184,6 +192,7 @@ export default function VatMappingSettings({
               <th>Billingo áfa érték</th>
               <th>IMA áfa kód</th>
               <th>Megjegyzés</th>
+              <th>Fordított áfás</th>
               <th></th>
             </tr>
           </thead>
@@ -217,6 +226,13 @@ export default function VatMappingSettings({
                   />
                 </td>
                 <td>
+                  <input
+                    type="checkbox"
+                    defaultChecked={m.isReverseCharge}
+                    onChange={(e) => patchMapping(m.id, { isReverseCharge: e.target.checked })}
+                  />
+                </td>
+                <td>
                   <button className="btn btn-sm btn-danger" onClick={() => deleteMapping(m.id)}>
                     Törlés
                   </button>
@@ -225,7 +241,7 @@ export default function VatMappingSettings({
             ))}
             {mappings.length === 0 && (
               <tr>
-                <td colSpan={4} className="muted">
+                <td colSpan={5} className="muted">
                   Még nincs áfa megfeleltetés.
                 </td>
               </tr>

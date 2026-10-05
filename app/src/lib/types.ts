@@ -26,7 +26,14 @@ export interface InvoiceLine {
   /** Külön ÁFA főkönyvi szám, csak megjelenítésre/ellenőrzésre — ld. docs/tervezes.md 8.3. */
   suggestedVatGlaCode: string | null;
   suggestedAmountSign: AmountSign | null;
-  suggestedRuleSource: "learned_invoiceanalytics" | "manual" | "vat_mapping" | "advance_reference" | null;
+  suggestedRuleSource:
+    | "learned_invoiceanalytics"
+    | "manual"
+    | "vat_mapping"
+    | "advance_reference"
+    | "cancellation_reference"
+    | "modification_reference"
+    | null;
   /** A ténylegesen illeszkedő MappingRule azonosítója/összefoglalója — "milyen szabály futott le rá". */
   suggestedRuleId: string | null;
   suggestedRuleSummary: string | null;
@@ -45,10 +52,41 @@ export interface InvoiceLine {
   approvedVatGlaCode: string | null;
   /** null = még nincs jóváhagyva, ilyenkor beküldéskor "original"-ként kezelendő. */
   approvedAmountSign: AmountSign | null;
+  /**
+   * Adójogi megfelelőségi figyelmeztetések erre a sorra — ld.
+   * `invoiceCompliance.ts` `checkLineCompliance`, docs/tervezes.md 19.
+   * fejezet. Üres/`null`, ha nincs probléma. FIGYELMEZTETÉS jellegű (mint
+   * az árfolyam-eltérés), NEM blokkolja a beküldést — csak felülvizsgálatra
+   * kényszerít (`needs_review` marad, tömeges jóváhagyásból kimarad).
+   */
+  complianceWarnings: string[] | null;
 }
 
 export function invoiceIsFullyClassified(lines: InvoiceLine[]): boolean {
   return lines.length > 0 && lines.every((l) => l.approvedGlaCode && l.approvedVatCode);
+}
+
+/** `true`, ha legalább egy tételsornak van megfelelőségi figyelmeztetése — ld. `checkLineCompliance`. */
+export function invoiceHasComplianceWarning(lines: InvoiceLine[]): boolean {
+  return lines.some((l) => l.complianceWarnings && l.complianceWarnings.length > 0);
+}
+
+/**
+ * A partner magánszemély-e — a Billingo `tax_type` EXPLICIT besorolása
+ * alapján (`"NO_TAX_NUMBER"`, ld. docs/tervezes.md 25. fejezet), NEM a
+ * hiányzó adószámból való következtetésből: egy vállalkozásnál a hiányzó
+ * adószám lehet egyszerű Billingo-oldali adathiány is, nem feltétlenül
+ * magánszemély — a `tax_type` ezt megbízhatóan megkülönbözteti. Ha a
+ * `taxType` még nincs kitöltve (régebbi, e mező bevezetése előtti
+ * szinkronból származó adat), a korábbi heurisztikára (nincs adószám)
+ * esik vissza.
+ */
+export function isPartnerPrivateIndividual(
+  partner: { taxType?: string | null; taxNumber: string | null } | null
+): boolean {
+  if (!partner) return false;
+  if (partner.taxType) return partner.taxType === "NO_TAX_NUMBER";
+  return !partner.taxNumber;
 }
 
 /**
@@ -59,14 +97,20 @@ export function invoiceIsFullyClassified(lines: InvoiceLine[]): boolean {
  * a beküldés a `partner_id`-s utat használja (ld. `submitInvoiceToIma`),
  * aminek NINCS szüksége teljes Billingo-oldali adószámra/számlázási címre
  * — ezért ilyenkor a hiányos Billingo-adat NEM ok a `needs_review`
- * státuszra/tömeges jóváhagyás blokkolására. Csak akkor kötelező a teljes
- * adószám+cím, ha nincs ismert IMA-partner (ilyenkor a `partner: {...}`
- * objektumos automatikus feloldás/létrehozás fut, aminek ez tényleg kell).
+ * státuszra/tömeges jóváhagyás blokkolására. Ha nincs ismert IMA-partner,
+ * a `partner: {...}` objektumos automatikus feloldás/létrehozás fut,
+ * aminek a TELJES CÍM mindig kell — az adószám viszont csak akkor, ha a
+ * partner NEM magánszemély (ld. `isPartnerPrivateIndividual`,
+ * 2026.09.17-i pontosítás, könyvelői visszajelzés: "itt a partner típus a
+ * fontos... az adószám csak vállalkozások esetén megadandó adat" — az IMA
+ * payload-nak ténylegesen sincs szüksége adószámra az automatikus
+ * létrehozáshoz, csak a címre).
  */
 export function isPartnerReadyForSubmission(
   partner: {
     imaPartnerCode?: string | null;
     taxNumber: string | null;
+    taxType?: string | null;
     postalCode: string | null;
     city: string | null;
     addressStreet: string | null;
@@ -74,5 +118,7 @@ export function isPartnerReadyForSubmission(
 ): boolean {
   if (!partner) return false;
   if (partner.imaPartnerCode) return true;
-  return Boolean(partner.taxNumber && partner.postalCode && partner.city && partner.addressStreet);
+  const hasFullAddress = Boolean(partner.postalCode && partner.city && partner.addressStreet);
+  if (!hasFullAddress) return false;
+  return isPartnerPrivateIndividual(partner) || Boolean(partner.taxNumber);
 }

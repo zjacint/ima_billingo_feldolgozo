@@ -4,6 +4,7 @@ import { getCachedGlaAccounts, getCachedVatKeys, getGlaAccountCacheUpdatedAt } f
 import ImaReferenceRefreshControls from "@/components/ImaReferenceRefreshControls";
 import LearnControls from "./LearnControls";
 import RulesEditor from "./RulesEditor";
+import SpecialOverrideSettings from "./SpecialOverrideSettings";
 
 // Lapozott lista — egyetlen nagy (akár több száz soros) betöltés a
 // szerveren memóriatúlterhelést (OOM, Cloud Run konténer-újraindulás/503)
@@ -32,6 +33,7 @@ export default async function RulesPage({
         commentPattern: true,
         documentTypePattern: true,
         vatPattern: true,
+        amountSignPattern: true,
         glaCode: true,
         vatCode: true,
         vatGlaCode: true,
@@ -103,6 +105,7 @@ export default async function RulesPage({
           commentPattern: r.commentPattern,
           documentTypePattern: r.documentTypePattern,
           vatPattern: r.vatPattern,
+          amountSignPattern: r.amountSignPattern as "positive" | "negative" | null,
           glaCode: r.glaCode,
           vatCode: r.vatCode,
           vatGlaCode: r.vatGlaCode,
@@ -113,6 +116,13 @@ export default async function RulesPage({
           active: r.active,
           lastMatchedAt: r.lastMatchedAt ? r.lastMatchedAt.toISOString() : null,
         }))}
+      />
+
+      <SpecialOverrideSettings
+        companyId={params.companyId}
+        initialEnableAdvanceSignOverride={company.enableAdvanceSignOverride}
+        initialEnableCancellationInheritance={company.enableCancellationInheritance}
+        initialEnableModificationInheritance={company.enableModificationInheritance}
       />
 
       {totalPages > 1 && (

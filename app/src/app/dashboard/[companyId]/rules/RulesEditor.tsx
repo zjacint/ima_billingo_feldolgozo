@@ -35,6 +35,8 @@ interface RuleRow {
   commentPattern: string | null;
   documentTypePattern: string | null;
   vatPattern: string | null;
+  /** A tétel nettó összegének előjele — sztornó/helyesbítő bizonylaton SOSEM értékelődik ki, ld. docs/tervezes.md 24. */
+  amountSignPattern: "positive" | "negative" | null;
   glaCode: string;
   vatCode: string;
   /** Külön ÁFA főkönyvi szám, csak megjelenítésre/ellenőrzésre — ld. docs/tervezes.md 8.3. */
@@ -88,6 +90,7 @@ function RuleEditModal({
   const [commentPattern, setCommentPattern] = useState(rule.commentPattern ?? "");
   const [documentTypePattern, setDocumentTypePattern] = useState(rule.documentTypePattern ?? "");
   const [vatPattern, setVatPattern] = useState(rule.vatPattern ?? "");
+  const [amountSignPattern, setAmountSignPattern] = useState<"" | "positive" | "negative">(rule.amountSignPattern ?? "");
   const [glaCode, setGlaCode] = useState(rule.glaCode);
   const [vatCode, setVatCode] = useState(rule.vatCode);
   const [vatGlaCode, setVatGlaCode] = useState(rule.vatGlaCode ?? "");
@@ -99,6 +102,7 @@ function RuleEditModal({
   const [error, setError] = useState<string | null>(null);
 
   const hasCondition = Boolean(partnerId || productNamePattern || commentPattern || documentTypePattern || vatPattern);
+  const signPatternAloneInvalid = Boolean(amountSignPattern) && !partnerId && !productNamePattern && !commentPattern && !vatPattern;
 
   async function handleSave() {
     setSaving(true);
@@ -110,6 +114,7 @@ function RuleEditModal({
         commentPattern: commentPattern || null,
         documentTypePattern: documentTypePattern || null,
         vatPattern: vatPattern || null,
+        amountSignPattern: amountSignPattern || null,
         glaCode,
         vatCode,
         vatGlaCode: vatGlaCode || null,
@@ -184,6 +189,20 @@ function RuleEditModal({
             <input type="text" value={vatPattern} onChange={(e) => setVatPattern(e.target.value)} placeholder="pl. F.AFA" />
           </label>
           <label className="field">
+            Előjel-feltétel (opcionális)
+            <span className="field-hint">
+              Csak egy másik feltétel MELLETT adható meg — sztornó/helyesbítő bizonylaton sosem érvényesül (ott az öröklés dönt).
+            </span>
+            <select
+              value={amountSignPattern}
+              onChange={(e) => setAmountSignPattern(e.target.value as "" | "positive" | "negative")}
+            >
+              <option value="">— nincs —</option>
+              <option value="positive">Csak pozitív összegű tétel</option>
+              <option value="negative">Csak negatív összegű tétel</option>
+            </select>
+          </label>
+          <label className="field">
             Árbevétel kontír (GL kód)
             <CodeNameCombobox value={glaCode} onChange={setGlaCode} options={glaAccountOptions} />
           </label>
@@ -229,7 +248,7 @@ function RuleEditModal({
             <button
               className="btn btn-sm btn-primary"
               onClick={handleSave}
-              disabled={saving || deleting || !glaCode || !vatCode || !hasCondition}
+              disabled={saving || deleting || !glaCode || !vatCode || !hasCondition || signPatternAloneInvalid}
             >
               {saving ? (
                 <>
@@ -375,6 +394,7 @@ export default function RulesEditor({
   const [commentPattern, setCommentPattern] = useState("");
   const [documentTypePattern, setDocumentTypePattern] = useState("");
   const [vatPattern, setVatPattern] = useState("");
+  const [amountSignPattern, setAmountSignPattern] = useState<"" | "positive" | "negative">("");
   const [glaCode, setGlaCode] = useState("");
   const [vatCode, setVatCode] = useState("");
   const [vatGlaCode, setVatGlaCode] = useState("");
@@ -389,6 +409,7 @@ export default function RulesEditor({
   const [showBulkEdit, setShowBulkEdit] = useState(false);
 
   const hasCondition = Boolean(partnerId || productNamePattern || commentPattern || documentTypePattern || vatPattern);
+  const signPatternAloneInvalid = Boolean(amountSignPattern) && !partnerId && !productNamePattern && !commentPattern && !vatPattern;
   const neverUsedRuleIds = rules.filter((r) => !r.lastMatchedAt).map((r) => r.id);
   const editingRule = rules.find((r) => r.id === editingRuleId) ?? null;
 
@@ -490,6 +511,7 @@ export default function RulesEditor({
           commentPattern: commentPattern || null,
           documentTypePattern: documentTypePattern || null,
           vatPattern: vatPattern || null,
+          amountSignPattern: amountSignPattern || null,
           glaCode,
           vatCode,
           vatGlaCode: vatGlaCode || null,
@@ -504,6 +526,7 @@ export default function RulesEditor({
       setCommentPattern("");
       setDocumentTypePattern("");
       setVatPattern("");
+      setAmountSignPattern("");
       setGlaCode("");
       setVatCode("");
       setVatGlaCode("");
@@ -670,6 +693,20 @@ export default function RulesEditor({
             <input type="text" value={vatPattern} onChange={(e) => setVatPattern(e.target.value)} placeholder="pl. F.AFA" />
           </label>
           <label className="field">
+            Előjel-feltétel (opcionális)
+            <span className="field-hint">
+              Csak egy másik feltétel MELLETT adható meg — sztornó/helyesbítő bizonylaton sosem érvényesül (ott az öröklés dönt).
+            </span>
+            <select
+              value={amountSignPattern}
+              onChange={(e) => setAmountSignPattern(e.target.value as "" | "positive" | "negative")}
+            >
+              <option value="">— nincs —</option>
+              <option value="positive">Csak pozitív összegű tétel</option>
+              <option value="negative">Csak negatív összegű tétel</option>
+            </select>
+          </label>
+          <label className="field">
             Árbevétel kontír (GL kód)
             <CodeNameCombobox value={glaCode} onChange={setGlaCode} options={glaAccountOptions} />
           </label>
@@ -702,7 +739,11 @@ export default function RulesEditor({
           </label>
         </div>
         <div>
-          <button className="btn btn-primary" onClick={createRule} disabled={submitting || !glaCode || !vatCode || !hasCondition}>
+          <button
+            className="btn btn-primary"
+            onClick={createRule}
+            disabled={submitting || !glaCode || !vatCode || !hasCondition || signPatternAloneInvalid}
+          >
             Létrehozás
           </button>
         </div>
@@ -726,6 +767,7 @@ export default function RulesEditor({
               <th>Megjegyzésminta</th>
               <th>Bizonylattípus</th>
               <th>Áfa minta</th>
+              <th>Előjel-feltétel</th>
               <th>Árbevétel kontír</th>
               <th>Áfa</th>
               <th>Áfa kontír</th>
@@ -752,6 +794,7 @@ export default function RulesEditor({
                   {r.vatPattern ?? "—"}
                   {r.note && <div className="muted text-sm">{r.note}</div>}
                 </td>
+                <td>{r.amountSignPattern === "positive" ? "Pozitív" : r.amountSignPattern === "negative" ? "Negatív" : "—"}</td>
                 <td>{r.glaCode}</td>
                 <td>{r.vatCode}</td>
                 <td>{r.vatGlaCode ?? "—"}</td>
@@ -785,7 +828,7 @@ export default function RulesEditor({
             ))}
             {rules.length === 0 && (
               <tr>
-                <td colSpan={14} className="muted">
+                <td colSpan={15} className="muted">
                   Még nincs szabály.
                 </td>
               </tr>

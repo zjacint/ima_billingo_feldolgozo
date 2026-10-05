@@ -21,6 +21,7 @@ const schema = z.object({
   billingoVatValue: z.string().min(1),
   imaVatCode: z.string().min(1),
   note: z.string().nullable().optional(),
+  isReverseCharge: z.boolean().optional(),
 });
 
 export async function POST(req: Request, { params }: { params: { companyId: string } }) {
@@ -37,6 +38,7 @@ export async function POST(req: Request, { params }: { params: { companyId: stri
         billingoVatValue: parsed.data.billingoVatValue.trim(),
         imaVatCode: parsed.data.imaVatCode.trim(),
         note: parsed.data.note ?? null,
+        isReverseCharge: parsed.data.isReverseCharge ?? false,
       },
     });
     return NextResponse.json(mapping, { status: 201 });

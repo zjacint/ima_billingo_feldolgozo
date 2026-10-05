@@ -19,6 +19,11 @@ const schema = z.object({
   primaryAdvanceGlaCode: z.string().optional(),
   // "OSS jelző" — ld. ossThreshold.ts, docs/tervezes.md 13. fejezet.
   ossRegistered: z.boolean().optional(),
+  // Speciális kontír-felülbírálási szabályok — ld. mappingRuleEngine.ts,
+  // docs/tervezes.md 24. fejezet.
+  enableAdvanceSignOverride: z.boolean().optional(),
+  enableCancellationInheritance: z.boolean().optional(),
+  enableModificationInheritance: z.boolean().optional(),
 });
 
 export async function PATCH(req: Request, { params }: { params: { companyId: string } }) {

@@ -9,6 +9,7 @@ const schema = z.object({
   commentPattern: z.string().nullable().optional(),
   documentTypePattern: z.string().nullable().optional(),
   vatPattern: z.string().nullable().optional(),
+  amountSignPattern: z.enum(["positive", "negative"]).nullable().optional(),
   glaCode: z.string().min(1).optional(),
   vatCode: z.string().min(1).optional(),
   vatGlaCode: z.string().nullable().optional(),
@@ -38,6 +39,14 @@ export async function PATCH(req: Request, { params }: { params: { companyId: str
     ) {
       return NextResponse.json(
         { error: "Legalább egy feltétel megadása kötelező (partner, termékminta, megjegyzés, bizonylattípus vagy áfa minta)." },
+        { status: 400 }
+      );
+    }
+    // Ld. route.ts (POST) doksztringje — az előjel-feltétel önmagában túl
+    // tág lenne, csak egy másik feltétel MELLETT engedjük.
+    if (merged.amountSignPattern && !merged.partnerId && !merged.productNamePattern && !merged.commentPattern && !merged.vatPattern) {
+      return NextResponse.json(
+        { error: "Az előjel-feltétel önmagában nem elég — adj meg mellé partnert, terméket, megjegyzést vagy áfa mintát is." },
         { status: 400 }
       );
     }

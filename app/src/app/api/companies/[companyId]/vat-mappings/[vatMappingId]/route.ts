@@ -7,6 +7,7 @@ const schema = z.object({
   billingoVatValue: z.string().min(1).optional(),
   imaVatCode: z.string().min(1).optional(),
   note: z.string().nullable().optional(),
+  isReverseCharge: z.boolean().optional(),
 });
 
 export async function PATCH(

@@ -86,6 +86,15 @@ function LineEditModal({
             Javasolta: {line.suggestedRuleSummary}
           </p>
         )}
+        {line.complianceWarnings && line.complianceWarnings.length > 0 && (
+          <div className="alert alert-warning stack" style={{ margin: 0 }}>
+            {line.complianceWarnings.map((w, i) => (
+              <p key={i} style={{ margin: 0 }}>
+                ⚠ {w}
+              </p>
+            ))}
+          </div>
+        )}
         <div className="cluster" style={{ justifyContent: "flex-end" }}>
           <button className="btn btn-sm" onClick={onClose}>
             Mégse
@@ -104,6 +113,8 @@ export default function InvoiceDetail({
   invoiceId,
   billingoDocumentNumber,
   status,
+  invoiceKind,
+  backHref,
   partnerName,
   partnerReadyForSubmission,
   currencyCode,
@@ -126,6 +137,10 @@ export default function InvoiceDetail({
   invoiceId: string;
   billingoDocumentNumber: string;
   status: string;
+  /** Ember-olvasható típus-címke — "Előlegszámla" | "Végszámla" | "Normál számla" | stb. (ld. billingoApiClient.ts invoiceKindLabel). */
+  invoiceKind: string;
+  /** A számlalista szűrő-/lapozás-állapotát megőrző visszatérési URL — jóváhagyás/elutasítás után ide navigálunk (könyvelői kérés, 2026.09.17). */
+  backHref: string;
   partnerName: string;
   /** ld. `isPartnerReadyForSubmission` (src/lib/types.ts) — ismert IMA partner ESETÉN a hiányos Billingo-adat sem blokkol. */
   partnerReadyForSubmission: boolean;
@@ -169,6 +184,11 @@ export default function InvoiceDetail({
   const canEdit = status === "synced" || status === "needs_review" || status === "failed";
   const canReject = ["synced", "needs_review", "approved", "failed"].includes(status);
   const isFullyClassified = lines.every((l) => l.approvedGlaCode && l.approvedVatCode);
+  // ld. invoiceCompliance.ts/docs/tervezes.md 19. fejezet — összesített,
+  // egyedi figyelmeztetés-szöveg lista a fejléc-bannerhez; a soronkénti
+  // jelzés (⚠ ikon) a táblázatban, a teljes szöveg a sor-szerkesztő
+  // panelben jelenik meg.
+  const complianceWarningMessages = Array.from(new Set(lines.flatMap((l) => l.complianceWarnings ?? [])));
 
   function saveLineFromModal(
     idx: number,
@@ -193,6 +213,9 @@ export default function InvoiceDetail({
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.error ?? `Sikertelen jóváhagyás (${res.status})`);
+      // Jóváhagyás után a számlalistára lépünk vissza (könyvelői kérés,
+      // 2026.09.17) — a `backHref` megőrzi a lista szűrő-/lapozás-állapotát.
+      router.push(backHref);
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Ismeretlen hiba történt.");
@@ -285,6 +308,8 @@ export default function InvoiceDetail({
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.error ?? `Sikertelen elutasítás (${res.status})`);
       setShowRejectForm(false);
+      // Elutasítás után a számlalistára lépünk vissza (könyvelői kérés, 2026.09.17).
+      router.push(backHref);
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Ismeretlen hiba történt.");
@@ -313,7 +338,9 @@ export default function InvoiceDetail({
       <div className="card stack">
         <div className="cluster" style={{ justifyContent: "space-between" }}>
           <div>
-            <div className="card-title">{billingoDocumentNumber}</div>
+            <div className="card-title">
+              {billingoDocumentNumber} <span className="badge badge-neutral">{invoiceKind}</span>
+            </div>
             <div className="muted text-sm">
               {partnerName} · {grossAmount.toLocaleString("hu-HU")} {currencyCode}
             </div>
@@ -372,6 +399,15 @@ export default function InvoiceDetail({
           <p className="alert alert-warning" style={{ margin: 0 }}>
             ⚠ {exchangeRateWarning}
           </p>
+        )}
+        {complianceWarningMessages.length > 0 && (
+          <div className="alert alert-warning stack" style={{ margin: 0 }}>
+            {complianceWarningMessages.map((w, i) => (
+              <p key={i} style={{ margin: 0 }}>
+                ⚠ {w}
+              </p>
+            ))}
+          </div>
         )}
         {status === "rejected" && rejectionReason && (
           <p className="alert alert-warning" style={{ margin: 0 }}>
@@ -445,7 +481,17 @@ export default function InvoiceDetail({
                   {line.comment && <div className="muted text-sm">{line.comment}</div>}
                 </td>
                 <td>{line.netAmount.toLocaleString("hu-HU")}</td>
-                <td>{line.vatPercentOrCode}</td>
+                <td>
+                  {line.vatPercentOrCode}
+                  {line.complianceWarnings && line.complianceWarnings.length > 0 && (
+                    <span
+                      title={line.complianceWarnings.join(" / ")}
+                      style={{ marginLeft: "0.3rem", cursor: "help" }}
+                    >
+                      ⚠
+                    </span>
+                  )}
+                </td>
                 <td>{line.approvedVatCode ?? <span className="muted">—</span>}</td>
                 <td>{line.approvedGlaCode ?? <span className="muted">—</span>}</td>
                 <td>{line.approvedVatGlaCode ?? <span className="muted">—</span>}</td>

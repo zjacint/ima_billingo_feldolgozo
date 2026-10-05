@@ -5,8 +5,18 @@
 
 import { InvoiceStatus, MappingRuleSource } from "@prisma/client";
 import { prisma } from "./db";
-import { invoiceIsFullyClassified, isPartnerReadyForSubmission, type AmountSign, type InvoiceLine } from "./types";
 import {
+  invoiceIsFullyClassified,
+  invoiceHasComplianceWarning,
+  isPartnerReadyForSubmission,
+  isPartnerPrivateIndividual,
+  type AmountSign,
+  type InvoiceLine,
+} from "./types";
+import { checkLineCompliance } from "./invoiceCompliance";
+import { reconcileLineAmounts, reconcileLinesToHeaderTotal } from "./amountReconciliation";
+import {
+  fetchImaGlaDetails,
   fetchImaPartners,
   pushSalesInvoiceRawAdd,
   uploadSalesInvoiceImageToIma,
@@ -14,7 +24,13 @@ import {
   type ImaSalesInvoiceLine,
 } from "./imaApiClient";
 import { fetchBillingoDocumentPdf } from "./billingoApiClient";
-import { resolvePrimaryAdvanceGlaCode, suggestMappingForLine, type LineMatchContext } from "./mappingRuleEngine";
+import {
+  resolveInheritedLineMapping,
+  resolvePrimaryAdvanceGlaCode,
+  suggestMappingForLine,
+  type LineMatchContext,
+  type MappingSuggestion,
+} from "./mappingRuleEngine";
 import { isOssRelevantPartner, findMissingOssVatMappings } from "./ossThreshold";
 import { findUniqueImaPartnerMatch } from "./partnerMatching";
 
@@ -163,7 +179,8 @@ const BULK_APPROVE_CANDIDATE_STATUSES: InvoiceStatus[] = [InvoiceStatus.synced, 
  * során. Jóváhagyás előtt számlánként ellenőrizzük, hogy minden, a
  * beküldéshez (exporthoz) szükséges mező elérhető és kitöltött-e (kontír,
  * áfa kulcs minden soron, partner + a partner adószáma/teljes számlázási
- * címe, nincs figyelmen kívül hagyott árfolyam-figyelmeztetés) — ami nem
+ * címe, nincs figyelmen kívül hagyott árfolyam- vagy megfelelőségi
+ * figyelmeztetés, ld. `invoiceCompliance.ts`) — ami nem
  * felel meg, azt a `results` tömbben jelezzük vissza a konkrét okkal, nem
  * pedig egyszerűen kihagyjuk a kijelölhető számlák közül.
  */
@@ -199,6 +216,10 @@ export async function bulkApproveInvoices(actingUserId: string, invoiceIds: stri
       }
       if (invoice.exchangeRateWarning) {
         results.push({ invoiceId, ok: false, error: `Árfolyam-figyelmeztetés: ${invoice.exchangeRateWarning}` });
+        continue;
+      }
+      if (invoiceHasComplianceWarning(approvedLines)) {
+        results.push({ invoiceId, ok: false, error: "Megfelelőségi figyelmeztetés van a számlán — egyenként ellenőrizendő." });
         continue;
       }
 
@@ -417,7 +438,7 @@ export async function runRecomputeSuggestionsBatch(
 
   const invoices = await prisma.invoice.findMany({
     where: { companyId, status: { in: RECOMPUTE_CANDIDATE_STATUSES } },
-    include: { partner: true },
+    include: { partner: true, company: true },
     orderBy: { id: "asc" },
     skip: offset,
     take: RECOMPUTE_BATCH_SIZE,
@@ -426,20 +447,66 @@ export async function runRecomputeSuggestionsBatch(
   // Csomagonként EGYSZER számoljuk ki (nem soronként) — ld.
   // mappingRuleEngine.ts `suggestMappingForLine` doksztringje.
   const primaryAdvanceGlaCode = await resolvePrimaryAdvanceGlaCode(companyId);
+  // ld. billingoSync.ts `buildReverseChargeLookup` doksztringje — ugyanaz
+  // a (cégenkénti, egyszeri lekérdezésű) minta itt, a javaslatok
+  // újraszámolásánál is.
+  const vatMappings = await prisma.vatCodeMapping.findMany({ where: { companyId } });
+  const reverseChargeLookup = new Map(vatMappings.map((m) => [m.billingoVatValue, m.isReverseCharge]));
 
   for (const invoice of invoices) {
     const lines = invoice.lines as unknown as InvoiceLine[];
     const newLines: InvoiceLine[] = [];
     for (const line of lines) {
-      const context: LineMatchContext = {
-        partnerId: invoice.partnerId,
-        productName: line.productName,
-        lineComment: line.comment,
-        headerComment: invoice.comment,
-        documentType: invoice.invoiceType,
+      // Speciális, dokumentum-kapcsolatot figyelembe vevő felülbírálás —
+      // ld. billingoSync.ts `saveBillingoDocument` ugyanezen lépése,
+      // `resolveInheritedLineMapping` doksztringje, docs/tervezes.md 24.
+      // fejezet.
+      const inherited = await resolveInheritedLineMapping(
+        companyId,
+        { invoiceType: invoice.invoiceType, relatedDocumentIds: invoice.relatedDocumentIds },
+        { productName: line.productName, quantity: line.quantity, netAmount: line.netAmount },
+        {
+          enableCancellationInheritance: invoice.company.enableCancellationInheritance,
+          enableModificationInheritance: invoice.company.enableModificationInheritance,
+        }
+      );
+
+      let suggestion: MappingSuggestion | null;
+      if (inherited) {
+        suggestion = {
+          glaCode: inherited.glaCode,
+          vatCode: inherited.vatCode,
+          vatGlaCode: inherited.vatGlaCode,
+          amountSign: inherited.amountSign,
+          source: inherited.source,
+          confidence: null,
+          ruleId: inherited.source,
+          ruleSummary: inherited.ruleSummary,
+          inexactMatchField: null,
+          inexactMatchValue: null,
+        };
+      } else {
+        const context: LineMatchContext = {
+          partnerId: invoice.partnerId,
+          productName: line.productName,
+          lineComment: line.comment,
+          headerComment: invoice.comment,
+          documentType: invoice.invoiceType,
+          vatPercentOrCode: line.vatPercentOrCode,
+          hasAdvanceSettlement: invoice.hasAdvanceSettlement,
+          isNegativeAmount: line.netAmount < 0,
+        };
+        suggestion = await suggestMappingForLine(companyId, context, {
+          primaryAdvanceGlaCode,
+          enableAdvanceSignOverride: invoice.company.enableAdvanceSignOverride,
+        });
+      }
+      const complianceWarnings = checkLineCompliance({
         vatPercentOrCode: line.vatPercentOrCode,
-      };
-      const suggestion = await suggestMappingForLine(companyId, context, { primaryAdvanceGlaCode });
+        isReverseCharge: reverseChargeLookup.get(line.vatPercentOrCode) ?? false,
+        partnerIsPrivateIndividual: isPartnerPrivateIndividual(invoice.partner),
+        isAdvanceDocument: invoice.invoiceType === "advance",
+      });
       newLines.push({
         ...line,
         suggestedGlaCode: suggestion?.glaCode ?? null,
@@ -451,12 +518,16 @@ export async function runRecomputeSuggestionsBatch(
         suggestedRuleSummary: suggestion?.ruleSummary ?? null,
         suggestedInexactMatchField: suggestion?.inexactMatchField ?? null,
         suggestedInexactMatchValue: suggestion?.inexactMatchValue ?? null,
+        complianceWarnings: complianceWarnings.length > 0 ? complianceWarnings : null,
       });
     }
 
     const fullyClassified = newLines.length > 0 && newLines.every((l) => l.suggestedGlaCode && l.suggestedVatCode);
     const status =
-      fullyClassified && isPartnerReadyForSubmission(invoice.partner) && !invoice.exchangeRateWarning
+      fullyClassified &&
+      isPartnerReadyForSubmission(invoice.partner) &&
+      !invoice.exchangeRateWarning &&
+      !invoiceHasComplianceWarning(newLines)
         ? InvoiceStatus.synced
         : InvoiceStatus.needs_review;
 
@@ -550,6 +621,54 @@ async function tryLinkNewlyCreatedImaPartner(
 }
 
 /**
+ * Duplikált beküldés (`ImaSalesInvoiceSubmitResult.duplicate`, ld.
+ * imaApiClient.ts `pushSalesInvoiceRawAdd` — az IMA "Invoice already
+ * exists (SH_NO + PostingDate)" hibája) esetén megpróbálja megtalálni a
+ * IMA-oldalon MÁR LÉTREJÖTT bizonylat azonosítóját, hogy a helyi állapot
+ * automatikusan helyreálljon (ne maradjon örökre `failed`-ben, ha a
+ * bizonylat valójában sikeresen létrejött, csak a válasz veszett el egy
+ * korábbi kísérletnél) — ld. docs/tervezes.md 20. fejezet.
+ *
+ * A `/gladetails` (Főkönyvi kivonat, KÖNYVELT/kontírozott tételek) végpontot
+ * használja, NEM a `/nav`-ot (könyvelői felismerés: ott a még nem
+ * kontírozott, NAV-online-ból beérkezett bizonylatok is látszanának, ami
+ * hamis pozitív találatot adhatna egy MÁSIK, még nem is beküldött
+ * bizonylatra). Az `InvoiceNo` mezőt (Billingo-formátumú számlaszám) a
+ * `mappingRuleEngine.ts` már megbízhatóan, kereszt-ellenőrzésre használja
+ * ugyanígy string-egyezéssel, ld. ott — ugyanaz a garancia vonatkozik erre
+ * a keresésre is. A bizonylat dátumára (`docDateIso`, ami a beküldött
+ * `posting_date`-tel egyezik) szűkítve kérdez le, hogy ne kelljen a teljes
+ * historikus GL-t áttölteni.
+ *
+ * Csak akkor ad vissza (nem-null) találatot, ha a számlaszámra
+ * illeszkedő GL-sorok MIND ugyanahhoz az egyetlen `salesHeaderId`-hez
+ * tartoznak — bármilyen bizonytalanság (nincs találat, vagy ELLENTMONDÓ
+ * `salesHeaderId`-k) esetén `null`-t ad, ilyenkor a hívó megtartja a
+ * normál "ellenőrizd kézzel IMA-ban" hibaüzenetet, NEM találgat.
+ */
+async function tryReconcileDuplicateSubmission(
+  credentials: ImaCredentials,
+  params: { invoiceNumber: string; docDateIso: string }
+): Promise<number | null> {
+  try {
+    const rows = await fetchImaGlaDetails(credentials, {
+      fromDate: params.docDateIso,
+      untilDate: params.docDateIso,
+    });
+    const matches = rows.filter((r) => r.invoiceNo === params.invoiceNumber);
+    if (matches.length === 0) return null;
+    const distinctSalesHeaderIds = new Set(
+      matches.map((m) => m.salesHeaderId).filter((id): id is number => id != null)
+    );
+    if (distinctSalesHeaderIds.size !== 1) return null;
+    return [...distinctSalesHeaderIds][0]!;
+  } catch (err) {
+    console.error(`IMA duplikáció-feloldás sikertelen (számla ${params.invoiceNumber}):`, err);
+    return null;
+  }
+}
+
+/**
  * A jóváhagyott számlát beküldi az IMA nyers `/api/invoices/sales/add`
  * végpontjára (ld. docs/tervezes.md 8. fejezet — nem a
  * `/api/import/sales-invoice`-ot, mert az az IMA-oldali
@@ -626,11 +745,43 @@ export async function submitInvoiceToIma(actingUserId: string, invoiceId: string
     }
   }
 
+  // Védőháló: a `saveBillingoDocument` a szinkron pontján már (1)
+  // soronként konzisztenssé teszi a
+  // nettó+áfa=bruttó összefüggést, ÉS (2) a sorok összegét a bizonylat
+  // FIX fejléc-összesítőjéhez (`Invoice.netAmount`/`vatAmount`/
+  // `grossAmount`, a Billingo `summary`/`gross_total` mezőiből) igazítja
+  // — ld. amountReconciliation.ts doksztringje, docs/tervezes.md 21.
+  // fejezet, könyvelői pontosítás: "nem a sorokból számolunk... az
+  // összesen adat, ami a számla fejből érkezik, az a fix. A sorokat lehet
+  // mozgatni." A beküldés viszont a DB-ben MÁR TÁROLT sorértékeket
+  // használja, ami egy korábbi (e javítás ELŐTTI) szinkronból még
+  // inkonzisztens lehet — itt, közvetlenül a tényleges IMA-export előtt,
+  // ugyanezt a két lépést újra elvégezzük.
+  const reconciledLines = lines.map((line) => {
+    const { netAmount, vatAmount, grossAmount } = reconcileLineAmounts(line.netAmount, line.vatAmount, line.grossAmount);
+    return { ...line, netAmount, vatAmount, grossAmount };
+  });
+  const rawHeaderNetAmount = invoice.netAmount != null ? Number(invoice.netAmount) : null;
+  const rawHeaderVatAmount = invoice.vatAmount != null ? Number(invoice.vatAmount) : null;
+  const rawHeaderGrossAmount = invoice.grossAmount != null ? Number(invoice.grossAmount) : null;
+  // A tárolt fejléc-összesítő MAGA is lehet inkonzisztens (ld.
+  // `saveBillingoDocument`-ben ugyanez a lépés, és annak doksztringje —
+  // élő IMA-hiba mutatta meg: "Explicit line amounts are inconsistent")
+  // — ezért itt is a `reconcileLineAmounts`-szal tesszük konzisztensre,
+  // MIELŐTT ehhez igazítanánk a sorokat.
+  const linesAlignedToHeader =
+    rawHeaderNetAmount != null && rawHeaderVatAmount != null && rawHeaderGrossAmount != null
+      ? reconcileLinesToHeaderTotal(
+          reconciledLines,
+          reconcileLineAmounts(rawHeaderNetAmount, rawHeaderVatAmount, rawHeaderGrossAmount)
+        ).lines
+      : reconciledLines;
+
   // Az `amountSign: negative` (pl. garanciális visszatartás, ld.
   // docs/tervezes.md 9.2) sorok előjelet váltanak: a nettó egységár és a
   // tétel nettó/áfa/bruttó összege is negatívba fordul, hogy a beküldött
   // sorok belsőleg (mennyiség × egységár ≈ összeg) konzisztensek maradjanak.
-  const submitLines: ImaSalesInvoiceLine[] = lines.map((line) => {
+  const submitLines: ImaSalesInvoiceLine[] = linesAlignedToHeader.map((line) => {
     const negative = line.approvedAmountSign === "negative";
     const sign = negative ? -1 : 1;
     return {
@@ -647,20 +798,63 @@ export async function submitInvoiceToIma(actingUserId: string, invoiceId: string
   });
 
   // A fejléc bruttó összesítőt a ténylegesen beküldött (előjel-korrigált)
-  // sorokból számoljuk újra — NEM az `Invoice.grossAmount` (a Billingo
-  // eredeti, korrekció nélküli) mezőjéből —, hogy a fejléc és a sorok
-  // összege garantáltan egyezzen (ld. 12.4.1 tanulság: fejléc/sor eltérés
-  // váratlan kerekítés-sort okozott a szállítói oldalon).
+  // sorokból számoljuk — az `approvedAmountSign: negative` felülbírálás
+  // miatt ez eltérhet a fenti, Billingo-fejlécből származó (mindig
+  // pozitív) `Invoice.grossAmount`-tól; enélkül a fejléc és a ténylegesen
+  // beküldött sorok összege NEM egyezne (a normál, felülbírálás nélküli
+  // esetben ez pontosan megegyezik `Invoice.grossAmount`-tal, hiszen a
+  // sorok fent már ahhoz lettek igazítva).
   const headerGrossAmount = submitLines.reduce((sum, l) => sum + l.grossAmount, 0);
 
   const docDateIso = toIsoDate(invoice.docDate);
+  const credentials = { apiKey: company.imaApiKey, user: company.imaApiUser, company: company.imaApiCompany };
+  const invoiceExternalId = invoice.billingoDocumentNumber ?? invoice.billingoDocumentId;
 
-  const result = await pushSalesInvoiceRawAdd(
-    { apiKey: company.imaApiKey, user: company.imaApiUser, company: company.imaApiCompany },
-    {
-      // Az IMA duplikáció-védelme erre (+ postingDate) fut — a Billingo
-      // dokumentum-azonosító stabil és cégen belül egyedi.
-      invoiceExternalId: invoice.billingoDocumentId,
+  // Előzetes ("preflight") ellenőrzés — könyvelői jelzés (2026.09.17): "azt
+  // is ellenőriznünk kellene, mielőtt átküldjük az ima-ba a számlát, hogy
+  // ott könyvelt státuszú-e... most egy csomónál úgy volt, hogy már
+  // könyvelt állapotú volt, de mi átküldtük." Ugyanazt a `/gladetails`-
+  // alapú keresést futtatjuk le, mint a duplikáció-feloldás (ld.
+  // `tryReconcileDuplicateSubmission`, docs/tervezes.md 20. fejezet), csak
+  // PROAKTÍVAN, a tényleges API-hívás ELŐTT — ha a bizonylat már
+  // megtalálható IMA-ban (kontírozva), egyáltalán nem küldjük be újra
+  // (elkerülve egy esetleges IMA-oldali duplikátum-bizonylat létrejöttét
+  // is, nem csak a hibaüzenetet), hanem egyből "könyvelt"-re állítjuk a
+  // felismert azonosítóval.
+  const preExistingImaInvoiceId = await tryReconcileDuplicateSubmission(credentials, {
+    invoiceNumber: invoiceExternalId,
+    docDateIso,
+  });
+
+  let resolvedImaInvoiceId: number | null;
+  let finalSuccess: boolean;
+  let finalError: string | null;
+  let reconciledFromDuplicate = false;
+  let originalDuplicateError: string | null = null;
+  let preFlightMatch = false;
+
+  if (preExistingImaInvoiceId != null) {
+    resolvedImaInvoiceId = preExistingImaInvoiceId;
+    finalSuccess = true;
+    finalError = null;
+    preFlightMatch = true;
+  } else {
+    const result = await pushSalesInvoiceRawAdd(credentials, {
+      // ⚠️ 2026.09.14-i javítás: az `invoice_external_id` mező az IMA
+      // OpenAPI sémája szerint "SH_NO" — ez NEM egy rejtett, csak
+      // duplikáció-védelemre szolgáló belső azonosító, hanem TÉNYLEGESEN
+      // ez jelenik meg az IMA felületén a bizonylat számaként ("Vevői
+      // szám" mező a Karton nézeten) — élő teszttel megerősítve
+      // (könyvelői visszajelzés): a korábbi `billingoDocumentId` (Billingo
+      // BELSŐ, numerikus dokumentum-azonosítója, pl. "134697529") ehelyett
+      // fiktív/értelmezhetetlen számként jelent meg IMA-ban, a Billingo
+      // valódi számlaszáma ("2026-4027") helyett. A `billingoDocumentNumber`
+      // (a Billingo TÉNYLEGES, emberi olvasásra szánt számlaszáma) ugyanúgy
+      // cégen belül egyedi és stabil, tehát az IMA duplikáció-védelemhez
+      // (ez + `postingDate`) is megfelel — csak arra az elméleti esetre
+      // esünk vissza a belső ID-ra, ha valamiért hiányozna (ld.
+      // `Invoice.billingoDocumentNumber: String?` nullable mező, schema.prisma).
+      invoiceExternalId,
       invoiceType: mapInvoiceTypeToIma(invoice.invoiceType),
       docDate: toCompactDate(docDateIso),
       postingDate: toCompactDate(docDateIso),
@@ -689,25 +883,54 @@ export async function submitInvoiceToIma(actingUserId: string, invoiceId: string
           ? Number(invoice.partner.imaPartnerCode)
           : null,
       lines: submitLines,
-    }
-  );
+    });
 
-  if (result.success && !invoice.partner.imaPartnerCode) {
-    await tryLinkNewlyCreatedImaPartner(
-      { apiKey: company.imaApiKey, user: company.imaApiUser, company: company.imaApiCompany },
-      { id: invoice.partner.id, name: invoice.partner.name, taxNumber: invoice.partner.taxNumber }
-    );
+    // Duplikáció-feloldás: ha az IMA azt jelezte, hogy a bizonylat MÁR
+    // LÉTEZIK (ld. `pushSalesInvoiceRawAdd` doksztringje — jellemzően egy
+    // korábbi kísérlet válasza veszett el, miközben a beszúrás IMA-oldalon
+    // sikeres volt), megpróbáljuk automatikusan megtalálni a ténylegesen
+    // létrejött bizonylat azonosítóját, hogy a helyi állapot ne ragadjon
+    // örökre `failed`-ben — ld. `tryReconcileDuplicateSubmission`
+    // doksztringje, docs/tervezes.md 20. fejezet. (A fenti PREFLIGHT
+    // ellenőrzés a leggyakoribb esetet már elkerüli, de elméletben
+    // előfordulhat, hogy a bizonylat PONT a preflight ellenőrzés és a
+    // tényleges beküldés közt jön létre IMA-ban máshonnan — ez a
+    // védőháló erre is jó.)
+    resolvedImaInvoiceId = result.imaInvoiceId;
+    finalSuccess = result.success;
+    finalError = result.error;
+    if (!result.success && result.duplicate) {
+      const recoveredId = await tryReconcileDuplicateSubmission(credentials, {
+        invoiceNumber: invoiceExternalId,
+        docDateIso,
+      });
+      if (recoveredId != null) {
+        resolvedImaInvoiceId = recoveredId;
+        finalSuccess = true;
+        finalError = null;
+        reconciledFromDuplicate = true;
+        originalDuplicateError = result.error;
+      }
+    }
+  }
+
+  if (finalSuccess && !invoice.partner.imaPartnerCode) {
+    await tryLinkNewlyCreatedImaPartner(credentials, {
+      id: invoice.partner.id,
+      name: invoice.partner.name,
+      taxNumber: invoice.partner.taxNumber,
+    });
   }
 
   let imageUploaded = false;
   let imageUploadError: string | null = null;
-  if (result.success && result.imaInvoiceId != null && company.billingoApiKey) {
+  if (finalSuccess && resolvedImaInvoiceId != null && company.billingoApiKey) {
     const imageResult = await attachInvoiceImage(
       company.billingoApiKey,
       invoice.billingoDocumentId,
-      `${invoice.billingoDocumentNumber ?? invoice.billingoDocumentId}.pdf`,
-      { apiKey: company.imaApiKey, user: company.imaApiUser, company: company.imaApiCompany },
-      result.imaInvoiceId
+      `${invoiceExternalId}.pdf`,
+      credentials,
+      resolvedImaInvoiceId
     );
     imageUploaded = imageResult.uploaded;
     imageUploadError = imageResult.error;
@@ -715,17 +938,17 @@ export async function submitInvoiceToIma(actingUserId: string, invoiceId: string
 
   const updated = await prisma.invoice.update({
     where: { id: invoiceId },
-    data: result.success
+    data: finalSuccess
       ? {
           status: InvoiceStatus.booked,
-          imaSalesheaderId: result.imaInvoiceId,
+          imaSalesheaderId: resolvedImaInvoiceId,
           imaPushError: null,
           imaImageUploaded: imageUploaded,
           imaImageUploadError: imageUploadError,
         }
       : {
           status: InvoiceStatus.failed,
-          imaPushError: result.error,
+          imaPushError: finalError,
         },
   });
 
@@ -737,7 +960,12 @@ export async function submitInvoiceToIma(actingUserId: string, invoiceId: string
       entityType: "Invoice",
       entityId: invoice.id,
       before: { status: invoice.status },
-      after: { status: updated.status, error: result.error },
+      after: {
+        status: updated.status,
+        error: finalError,
+        ...(preFlightMatch ? { preFlightMatch: true } : {}),
+        ...(reconciledFromDuplicate ? { reconciledFromDuplicate: true, originalError: originalDuplicateError } : {}),
+      },
     },
   });
 
@@ -773,4 +1001,91 @@ export async function retryInvoiceImageUpload(invoiceId: string) {
     where: { id: invoiceId },
     data: { imaImageUploaded: imageResult.uploaded, imaImageUploadError: imageResult.error },
   });
+}
+
+export interface ImaReconciliationResult {
+  /** Hány helyileg `booked` (könyveltnek jelölt) számlát ellenőriztünk. */
+  checked: number;
+  /** Azok a számlák, amik IMA-oldalon NEM voltak megtalálhatók, ezért visszaálltak `approved`-re. */
+  reset: { invoiceId: string; billingoDocumentNumber: string }[];
+}
+
+/**
+ * Ellenőrzi, hogy a helyileg "könyvelt" (`booked`) állapotú számlák
+ * TÉNYLEGESEN megvannak-e IMA-oldalon — könyvelői kérés (2026.09.14): "most
+ * töröltem az összes bizonylatot, amit átadtunk az IMA-ba... ami nincs az
+ * ima-ban, azt annál ne legyen könyvelt/ima-ba átadott a státusz." Ez a
+ * helyzet bármikor előállhat (nem csak egy tömeges törlés után) — pl. egy
+ * korábbi beküldés IMA-oldalon sikeres volt, de a helyi állapot valamiért
+ * mégsem frissült rendesen.
+ *
+ * A `/gladetails` (Főkönyvi kivonat — csak a TÉNYLEGESEN kontírozott/
+ * könyvelt tételek) végpontot használja, UGYANAZT az `invoiceNo` mezőt,
+ * amit a duplikáció-feloldás (`tryReconcileDuplicateSubmission`) is
+ * megbízhatóan, Billingo-formátumú számlaszámként kezel — NEM a `/nav`
+ * végpontot, mert ott a még nem kontírozott, NAV-onlineból beérkezett
+ * bizonylatok is szerepelnének, ami hamis "megvan" eredményt adna egy
+ * valójában nem-kontírozott bizonylatra.
+ *
+ * Fontos: ez EGYENKÉNT, a tényleges számlaszám alapján ellenőriz minden
+ * helyileg `booked` számlát — NEM egy "utolsó IMA-sorszám" küszöbre épít.
+ * Ez azért lényeges, mert több számlatömb (eltérő prefixű számlaszám-
+ * sorozat) esetén egyetlen "utolsó szám" nem tudná helyesen lefedni az
+ * összes sorozatot — az egyenkénti, számlaszám szerinti meglét-ellenőrzés
+ * viszont magától, sorozatok számától függetlenül helyesen működik.
+ *
+ * A helyileg `booked` számlák kelt-dátumainak (docDate) minimumától
+ * maximumáig kér le egy IMA-lekérdezést (egyetlen hívással, dátum-
+ * tartományra szűkítve — nem kell a teljes historikus GL-t áttölteni).
+ * Minden olyan helyi számlát, aminek a számlaszáma NEM szerepel a
+ * visszakapott listában, visszaállít `approved` státuszra (törli az
+ * `imaSalesheaderId`-t, `imaPushError`-ba egy magyarázó üzenetet ír) — ez
+ * a normál "Beküldés IMA-nak" úton újra beküldhetővé teszi, a duplikáció-
+ * feloldással és a nettó+áfa=bruttó-korrekcióval együtt (ld.
+ * `submitInvoiceToIma`).
+ */
+export async function reconcileBookedInvoicesWithIma(companyId: string): Promise<ImaReconciliationResult> {
+  const company = await prisma.company.findUniqueOrThrow({ where: { id: companyId } });
+  if (!company.imaApiKey || !company.imaApiUser || !company.imaApiCompany) {
+    throw new ValidationError("A céghez nincs teljesen beállítva az IMA API hozzáférés.");
+  }
+
+  const bookedInvoices = await prisma.invoice.findMany({
+    where: { companyId, status: InvoiceStatus.booked },
+    select: { id: true, billingoDocumentNumber: true, billingoDocumentId: true, docDate: true },
+  });
+  if (bookedInvoices.length === 0) return { checked: 0, reset: [] };
+
+  const docDates = bookedInvoices.map((i) => i.docDate).filter((d): d is Date => d != null);
+  const minDate = docDates.length > 0 ? new Date(Math.min(...docDates.map((d) => d.getTime()))) : new Date();
+  const maxDate = docDates.length > 0 ? new Date(Math.max(...docDates.map((d) => d.getTime()))) : new Date();
+
+  const glaRows = await fetchImaGlaDetails(
+    { apiKey: company.imaApiKey, user: company.imaApiUser, company: company.imaApiCompany },
+    { fromDate: minDate.toISOString().slice(0, 10), untilDate: maxDate.toISOString().slice(0, 10) }
+  );
+  const foundInvoiceNumbers = new Set(glaRows.map((r) => r.invoiceNo));
+
+  const toReset = bookedInvoices
+    .map((inv) => ({ invoiceId: inv.id, billingoDocumentNumber: inv.billingoDocumentNumber ?? inv.billingoDocumentId }))
+    .filter((inv) => !foundInvoiceNumbers.has(inv.billingoDocumentNumber));
+
+  if (toReset.length > 0) {
+    await prisma.$transaction(
+      toReset.map((inv) =>
+        prisma.invoice.update({
+          where: { id: inv.invoiceId },
+          data: {
+            status: InvoiceStatus.approved,
+            imaSalesheaderId: null,
+            imaPushError:
+              "IMA-egyeztetés: a bizonylat nem található IMA-ban (törölve lett IMA-oldalon, vagy a korábbi " +
+              "beküldés válasza tévesen jelzett sikert) — újra be kell küldeni.",
+          },
+        })
+      )
+    );
+  }
+
+  return { checked: bookedInvoices.length, reset: toReset };
 }

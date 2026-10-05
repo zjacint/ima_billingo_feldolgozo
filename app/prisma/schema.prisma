@@ -143,6 +143,30 @@ model Company {
   // szabályokból (ha van egyértelmű/domináns kontír).
   primaryAdvanceGlaCode String?
 
+  // Speciális, dokumentum-kapcsolatot figyelembe vevő kontír-felülbírálási
+  // szabályok — ld. mappingRuleEngine.ts, docs/tervezes.md 24. fejezet,
+  // könyvelői kérés (2026.09.17). Mindegyik cégenként KÜLÖN kapcsolható
+  // (könyvelői döntés: "egyenként, külön kapcsolóval" — ha valamelyik egy
+  // adott cégnél nem működik jól, a többi továbbra is használható).
+  // Alapértelmezetten KIKAPCSOLVA — új, automatikus kontír-viselkedés,
+  // a könyvelő tudatos bekapcsolása szükséges hozzá (ld. docs/tervezes.md
+  // 19. fejezet "javaslat, ne autonóm döntés" alapelve).
+  //
+  // 1) Végszámlán a negatív összegű tétel (előleg-visszavonás) automatikusan
+  // az elsődleges előleg főkönyvi számra kontírozódik, a megjegyzés-alapú
+  // hivatkozás-felismeréstől (ld. `parseAdvanceReferenceNumber`) FÜGGETLEN,
+  // KIEGÉSZÍTŐ jelként.
+  enableAdvanceSignOverride Boolean @default(false)
+  // 2) Stornó számla tételei a stornózott (eredeti) számla AZONOS tételének
+  // jóváhagyott kontírját/áfa kódját öröklik — termékmegnevezés+mennyiség+
+  // összeg alapú párosítással. Ha nincs egyértelmű párosítás, a normál
+  // szabály-illesztésre esik vissza (könyvelői döntés: sosem találgat).
+  enableCancellationInheritance Boolean @default(false)
+  // 3) Ugyanaz, mint a 2), de helyesbítő (módosító) számlára — lazább
+  // párosítás, ugyanazzal a "nincs egyértelmű találat -> normál
+  // szabály-illesztés" biztonsági hálóval.
+  enableModificationInheritance Boolean @default(false)
+
   // "OSS jelző": a cég TÉNYLEGESEN regisztrált-e az uniós egyablakos
   // (OSS) rendszerre — ld. docs/tervezes.md 13. fejezet, könyvelői döntés
   // (2026.08.16): mivel a rendszer csak azt dolgozza fel, amit a kliens
@@ -294,6 +318,11 @@ model VatCodeMapping {
   billingoVatValue String
   // Az IMA-nak ténylegesen küldendő áfa kód (pl. "27%", "ÁKK").
   imaVatCode       String
+  // Fordított áfás kulcs-e — ld. docs/tervezes.md 19. fejezet
+  // (2026.09.13-i könyvelői kérés): fordított áfás kulcs magánszemély
+  // partnerhez, ill. előlegszámlán NEM állítható be jogszerűen —
+  // `invoiceCompliance.ts` ezt a jelzőt nézi a figyelmeztetésekhez.
+  isReverseCharge  Boolean @default(false)
   note             String?
 
   createdAt DateTime @default(now())
@@ -357,6 +386,13 @@ model Partner {
   billingoPartnerId String
   name              String
   taxNumber         String?
+  // Billingo `tax_type` mezője ("" | "FOREIGN" | "HAS_TAX_NUMBER" |
+  // "NO_TAX_NUMBER") — a partner EXPLICIT, Billingo-oldali besorolása
+  // vállalkozás/külföldi/magánszemély szerint, ld. docs/tervezes.md 25.
+  // fejezet. Megbízhatóbb, mint a `taxNumber` üres/kitöltött voltából
+  // következtetni (egy vállalkozásnál a hiányzó adószám lehet egyszerű
+  // adathiány is, nem feltétlenül magánszemély).
+  taxType           String?
   postalCode        String?
   city              String?
   addressStreet     String?
@@ -400,6 +436,15 @@ model MappingRule {
   documentTypePattern String?
   // A Billingo `Vat` (tétel áfa kulcs/kód) értékére illeszkedik (pl. "F.AFA").
   vatPattern          String?
+  // A tétel nettó összegének előjelére illeszkedik ("positive"/"negative"),
+  // `null` = nincs megkötés — ld. docs/tervezes.md 24. fejezet, 2026.09.18-i
+  // kiegészítés (könyvelői kérés: egy termék terméknévre tanult kontírja
+  // ne "vakon" illeszkedjen ellentétes előjelű sorra, pl. végszámla
+  // pozitív árbevétel-tétele vs. korábban KIZÁRÓLAG előleg-visszavonásból
+  // tanult, azonos nevű negatív tételek). A motor (`matchRuleAgainstContext`)
+  // ezt a feltételt sztornó/helyesbítő bizonylattípuson SOHA nem értékeli ki
+  // (ott az előjel jelentése megfordul/öröklődik) — a szabály ott sosem nyer.
+  amountSignPattern   String?
 
   // Hatás.
   // Árbevétel (eredmény-) kontír — ld. docs/tervezes.md 8.3/9.4,
@@ -454,6 +499,14 @@ model Invoice {
   // "normál számlától" (az "előlegszámla" maga az `invoiceType == "advance"`
   // eset) — ld. docs/tervezes.md 7. fejezet, 2026.08.12-i kiegészítés.
   hasAdvanceSettlement       Boolean   @default(false)
+  // A Billingo `related_documents` tömb elemeinek (`DocumentAncestor.id`)
+  // tényleges Billingo dokumentum-azonosítói — eddig csak a fenti
+  // `hasAdvanceSettlement` boolean tárolta, hogy VAN-e kapcsolódó
+  // bizonylat, a konkrét azonosítót nem. Ez teszi lehetővé, hogy egy
+  // stornó/helyesbítő/végszámla vissza tudjon keresni a KONKRÉT eredeti
+  // bizonylatra (ld. mappingRuleEngine.ts `resolveInheritedLineMapping`,
+  // docs/tervezes.md 24. fejezet).
+  relatedDocumentIds         String[]  @default([])
   // A Billingo `Document.cancelled` mezője — korábban a szinkron teljesen
   // kihagyta a törölt/sztornózott bizonylatokat, 2026.08.16-tól (könyvelői
   // kérés) ezek is bekerülnek, ezzel a jelzővel megkülönböztetve, hogy a

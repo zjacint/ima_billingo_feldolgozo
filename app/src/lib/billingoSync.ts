@@ -15,11 +15,38 @@ import {
   type BillingoDocument,
   type BillingoDocumentType,
 } from "./billingoApiClient";
-import { resolvePrimaryAdvanceGlaCode, suggestMappingForLine, type LineMatchContext } from "./mappingRuleEngine";
+import {
+  resolveInheritedLineMapping,
+  resolvePrimaryAdvanceGlaCode,
+  suggestMappingForLine,
+  type LineMatchContext,
+  type MappingSuggestion,
+} from "./mappingRuleEngine";
 import { checkExchangeRateDeviation } from "./exchangeRate";
 import { detectInvoicePaymentTransaction } from "./paymentTransactionDetection";
 import { extractYearFromPrefix, findInvoiceNumberGaps, groupConsecutiveNumbers } from "./invoiceNumberGaps";
-import { isPartnerReadyForSubmission, type InvoiceLine } from "./types";
+import { checkLineCompliance } from "./invoiceCompliance";
+import { reconcileLineAmounts, reconcileLinesToHeaderTotal } from "./amountReconciliation";
+import {
+  isPartnerReadyForSubmission,
+  isPartnerPrivateIndividual,
+  invoiceHasComplianceWarning,
+  type InvoiceLine,
+} from "./types";
+
+/**
+ * Cégenkénti (Billingo áfa érték -> fordított áfás-e) térkép egyetlen
+ * lekérdezéssel — ugyanaz a minta, mint `primaryAdvanceGlaCode`-nál
+ * (`saveBillingoDocument` hívónként egyszer kéri le, nem soronként), ld.
+ * `invoiceCompliance.ts`/docs/tervezes.md 19. fejezet. A pontos (nem
+ * normalizált) `billingoVatValue` az egyezés alapja — ugyanaz a konvenció,
+ * mint a `VatCodeMapping` áfa-kód-fallback lookupnál (ld.
+ * mappingRuleEngine.ts `computeStandardSuggestion`).
+ */
+async function buildReverseChargeLookup(companyId: string): Promise<Map<string, boolean>> {
+  const mappings = await prisma.vatCodeMapping.findMany({ where: { companyId } });
+  return new Map(mappings.map((m) => [m.billingoVatValue, m.isReverseCharge]));
+}
 
 export interface BillingoSyncResult {
   fetched: number;
@@ -91,7 +118,8 @@ async function saveBillingoDocument(
   company: Company,
   doc: BillingoDocument,
   result: BillingoSyncResult,
-  primaryAdvanceGlaCode: string | null
+  primaryAdvanceGlaCode: string | null,
+  reverseChargeLookup: Map<string, boolean>
 ): Promise<void> {
   // Korábban a törölt/sztornózott Billingo bizonylatokat teljesen kihagytuk
   // — könyvelői kérésre (2026.08.16) ez megváltozott: ezek is bekerülnek
@@ -108,6 +136,7 @@ async function saveBillingoDocument(
     update: {
       name: doc.partner.name,
       taxNumber: doc.partner.taxNumber,
+      taxType: doc.partner.taxType,
       postalCode: doc.partner.postalCode,
       city: doc.partner.city,
       addressStreet: doc.partner.addressStreet,
@@ -118,6 +147,7 @@ async function saveBillingoDocument(
       billingoPartnerId: doc.partner.billingoPartnerId,
       name: doc.partner.name,
       taxNumber: doc.partner.taxNumber,
+      taxType: doc.partner.taxType,
       postalCode: doc.partner.postalCode,
       city: doc.partner.city,
       addressStreet: doc.partner.addressStreet,
@@ -125,17 +155,73 @@ async function saveBillingoDocument(
     },
   });
 
-  const lines: InvoiceLine[] = [];
+  let lines: InvoiceLine[] = [];
   for (const item of doc.items) {
-    const context: LineMatchContext = {
-      partnerId: partner.id,
-      productName: item.name,
-      lineComment: item.comment,
-      headerComment: doc.comment,
-      documentType: doc.type,
+    // Speciális, dokumentum-kapcsolatot figyelembe vevő felülbírálás — ld.
+    // `resolveInheritedLineMapping` doksztringje, docs/tervezes.md 24.
+    // fejezet. Ha talál egyértelmű öröklendő kontírt (stornó/helyesbítő),
+    // az MEGELŐZI a normál szabály-illesztést; egyébként a normál út fut,
+    // kiegészítve az előjel-alapú előleg-jelzéssel (ld. lent).
+    const inherited = await resolveInheritedLineMapping(
+      companyId,
+      { invoiceType: doc.type, relatedDocumentIds: doc.relatedDocumentIds },
+      { productName: item.name, quantity: item.quantity, netAmount: item.netAmount },
+      {
+        enableCancellationInheritance: company.enableCancellationInheritance,
+        enableModificationInheritance: company.enableModificationInheritance,
+      }
+    );
+
+    let suggestion: MappingSuggestion | null;
+    if (inherited) {
+      suggestion = {
+        glaCode: inherited.glaCode,
+        vatCode: inherited.vatCode,
+        vatGlaCode: inherited.vatGlaCode,
+        amountSign: inherited.amountSign,
+        source: inherited.source,
+        confidence: null,
+        ruleId: inherited.source,
+        ruleSummary: inherited.ruleSummary,
+        inexactMatchField: null,
+        inexactMatchValue: null,
+      };
+    } else {
+      const context: LineMatchContext = {
+        partnerId: partner.id,
+        productName: item.name,
+        lineComment: item.comment,
+        headerComment: doc.comment,
+        documentType: doc.type,
+        vatPercentOrCode: item.vat,
+        hasAdvanceSettlement: doc.hasRelatedDocuments,
+        isNegativeAmount: item.netAmount < 0,
+      };
+      suggestion = await suggestMappingForLine(companyId, context, {
+        primaryAdvanceGlaCode,
+        enableAdvanceSignOverride: company.enableAdvanceSignOverride,
+      });
+    }
+    const complianceWarnings = checkLineCompliance({
       vatPercentOrCode: item.vat,
-    };
-    const suggestion = await suggestMappingForLine(companyId, context, { primaryAdvanceGlaCode });
+      isReverseCharge: reverseChargeLookup.get(item.vat) ?? false,
+      partnerIsPrivateIndividual: isPartnerPrivateIndividual(doc.partner),
+      isAdvanceDocument: doc.type === "advance",
+    });
+    // ld. amountReconciliation.ts doksztringje, docs/tervezes.md 21.
+    // fejezet — a Billingo API néhol egymástól függetlenül kerekített
+    // nettó/áfa/bruttó tétel-mezőket ad vissza, ami sértheti a
+    // (jogszabály által is megkövetelt) nettó+áfa=bruttó összefüggést;
+    // itt, a szinkron pontján garantáljuk, hogy ez SOHA ne kerüljön be
+    // ilyen inkonzisztensen az adatbázisba/IMA-beküldésbe.
+    const { netAmount: lineNetAmount, vatAmount: lineVatAmount, grossAmount: lineGrossAmount, corrected } =
+      reconcileLineAmounts(item.netAmount, item.vatAmount, item.grossAmount);
+    if (corrected) {
+      console.warn(
+        `Számlatétel nettó+áfa!=bruttó eltérés javítva (${doc.invoiceNumber}, "${item.name}"): ` +
+          `Billingo áfa=${item.vatAmount} -> ${lineVatAmount} (nettó=${lineNetAmount}, bruttó=${lineGrossAmount}).`
+      );
+    }
     lines.push({
       productName: item.name,
       comment: item.comment,
@@ -143,9 +229,9 @@ async function saveBillingoDocument(
       unitOfMeasure: item.unit,
       netUnitCost: item.netUnitAmount,
       vatPercentOrCode: item.vat,
-      netAmount: item.netAmount,
-      vatAmount: item.vatAmount,
-      grossAmount: item.grossAmount,
+      netAmount: lineNetAmount,
+      vatAmount: lineVatAmount,
+      grossAmount: lineGrossAmount,
       suggestedGlaCode: suggestion?.glaCode ?? null,
       suggestedVatCode: suggestion?.vatCode ?? null,
       suggestedVatGlaCode: suggestion?.vatGlaCode ?? null,
@@ -159,7 +245,58 @@ async function saveBillingoDocument(
       approvedVatCode: null,
       approvedVatGlaCode: null,
       approvedAmountSign: null,
+      complianceWarnings: complianceWarnings.length > 0 ? complianceWarnings : null,
     });
+  }
+
+  // A fejléc nettó/áfa/bruttó összesítője a Billingo `summary`-jából (és a
+  // dokumentum `gross_total`-jából) jön — ez a FIX, irányadó érték, a
+  // sorokat (az utolsó sort) igazítjuk EHHEZ, nem fordítva — ld.
+  // amountReconciliation.ts doksztringje, docs/tervezes.md 21. fejezet,
+  // könyvelői pontosítás (2026.09.14): "nem a sorokból számolunk... az
+  // összesen adat, ami a számla fejből érkezik, az a fix." Ha a Billingo
+  // válasz valamiért nem adja a `summary`-t (nem várt), defenzíven a
+  // sorok összegére esünk vissza.
+  const rawHeaderNetAmount = doc.netTotal ?? lines.reduce((sum, l) => sum + l.netAmount, 0);
+  const rawHeaderVatAmount = doc.vatTotal ?? lines.reduce((sum, l) => sum + l.vatAmount, 0);
+  // ⚠️ A Billingo fejléc-összesítője MAGA is ugyanúgy érintett lehet a
+  // fentebb (soronként) már megismert, egymástól független kerekítés
+  // jelenségtől — élő IMA-hiba ("Explicit line amounts are inconsistent")
+  // mutatta meg, hogy a `summary.net_amount`+`summary.vat_amount` nem
+  // mindig adja ki pontosan a `gross_total`-t. Emiatt a fejlécet MAGÁT is
+  // a `reconcileLineAmounts`-szal (nettó+bruttó irányadó, áfa ebből
+  // származtatva) tesszük konzisztensre, MIELŐTT ehhez igazítanánk a
+  // sorokat — enélkül egy inkonzisztens fejléc-célértékre igazítva a
+  // korrigált (utolsó) sor is inkonzisztens maradna.
+  const { netAmount: headerNetAmount, vatAmount: headerVatAmount, grossAmount: headerGrossAmount } =
+    reconcileLineAmounts(rawHeaderNetAmount, rawHeaderVatAmount, doc.grossTotal);
+
+  const {
+    lines: reconciledLines,
+    corrected: linesAdjustedToHeader,
+    netDelta,
+    vatDelta,
+    grossDelta,
+  } = reconcileLinesToHeaderTotal(lines, {
+    netAmount: headerNetAmount,
+    vatAmount: headerVatAmount,
+    grossAmount: headerGrossAmount,
+  });
+  lines = reconciledLines;
+  if (linesAdjustedToHeader) {
+    console.warn(
+      `Tételsorok összege eltért a Billingo fejléc-összesítőtől, az utolsó sor korrigálva (${doc.invoiceNumber}): ` +
+        `nettó-eltérés=${netDelta}, áfa-eltérés=${vatDelta}, bruttó-eltérés=${grossDelta}.`
+    );
+    if (Math.max(Math.abs(netDelta), Math.abs(vatDelta), Math.abs(grossDelta)) > 1) {
+      // Kerekítési szinten (±1 egység) túlmutató eltérés — valószínűleg
+      // NEM egyszerű kerekítés, hanem komolyabb adateltérésre utal (pl.
+      // hiányzó/extra tétel, dokumentum-szintű kedvezmény, amit a
+      // szinkron nem tud lekövetni). A korrekció ekkor is megtörténik (a
+      // tárolt/beküldött adat így is konzisztens marad), de ez indokolt
+      // lehet kézi ellenőrzésre.
+      console.warn(`  -> ez kerekítési szintnél nagyobb eltérés, érdemes ellenőrizni a bizonylatot: ${doc.invoiceNumber}`);
+    }
   }
 
   // Devizás számlánál a Billingo `conversion_rate`-je a könyvelendő
@@ -197,12 +334,12 @@ async function saveBillingoDocument(
 
   const fullyClassified = lines.length > 0 && lines.every((l) => l.suggestedGlaCode && l.suggestedVatCode);
   const status: InvoiceStatus =
-    fullyClassified && isPartnerReadyForSubmission(partner) && !exchangeRateWarning
+    fullyClassified &&
+    isPartnerReadyForSubmission(partner) &&
+    !exchangeRateWarning &&
+    !invoiceHasComplianceWarning(lines)
       ? InvoiceStatus.synced
       : InvoiceStatus.needs_review;
-
-  const netAmount = lines.reduce((sum, l) => sum + l.netAmount, 0);
-  const vatAmount = lines.reduce((sum, l) => sum + l.vatAmount, 0);
 
   const existing = await prisma.invoice.findUnique({
     where: { companyId_billingoDocumentId: { companyId, billingoDocumentId: doc.id } },
@@ -221,6 +358,7 @@ async function saveBillingoDocument(
     status,
     invoiceType: doc.type,
     hasAdvanceSettlement: doc.hasRelatedDocuments,
+    relatedDocumentIds: doc.relatedDocumentIds,
     paymentMethod: mapBillingoPaymentMethodToIma(doc.paymentMethod),
     currencyCode: doc.currency,
     exchangeRate: doc.conversionRate,
@@ -228,9 +366,9 @@ async function saveBillingoDocument(
     docDate: doc.invoiceDate ? new Date(doc.invoiceDate) : null,
     fulfillmentDate: doc.fulfillmentDate ? new Date(doc.fulfillmentDate) : null,
     dueDate: doc.dueDate ? new Date(doc.dueDate) : null,
-    netAmount,
-    vatAmount,
-    grossAmount: doc.grossTotal,
+    netAmount: headerNetAmount,
+    vatAmount: headerVatAmount,
+    grossAmount: headerGrossAmount,
     comment: doc.comment,
     lines: lines as unknown as object,
     detectedPaymentTransactionId: detectedTransaction?.transactionId ?? null,
@@ -308,6 +446,7 @@ export async function runBillingoSyncBatch(
   // Cégenként/csomagonként EGYSZER számoljuk ki (nem soronként) — ld.
   // mappingRuleEngine.ts `suggestMappingForLine` doksztringje.
   const primaryAdvanceGlaCode = await resolvePrimaryAdvanceGlaCode(companyId);
+  const reverseChargeLookup = await buildReverseChargeLookup(companyId);
 
   state.result.fetched += batch.documents.length;
   let maxInvoiceDate = state.maxInvoiceDateIso ? new Date(state.maxInvoiceDateIso) : null;
@@ -316,7 +455,7 @@ export async function runBillingoSyncBatch(
       const docInvoiceDate = new Date(doc.invoiceDate);
       if (!maxInvoiceDate || docInvoiceDate > maxInvoiceDate) maxInvoiceDate = docInvoiceDate;
     }
-    await saveBillingoDocument(companyId, company, doc, state.result, primaryAdvanceGlaCode);
+    await saveBillingoDocument(companyId, company, doc, state.result, primaryAdvanceGlaCode, reverseChargeLookup);
   }
   state.maxInvoiceDateIso = maxInvoiceDate ? maxInvoiceDate.toISOString() : null;
 
@@ -450,6 +589,7 @@ export async function runGapFillBatch(
   }
 
   const primaryAdvanceGlaCode = await resolvePrimaryAdvanceGlaCode(companyId);
+  const reverseChargeLookup = await buildReverseChargeLookup(companyId);
   const batch = state.pendingItems.slice(0, GAP_FILL_RANGES_PER_BATCH);
   const rest = state.pendingItems.slice(GAP_FILL_RANGES_PER_BATCH);
   const syncResult: BillingoSyncResult = { fetched: 0, created: 0, updated: 0, skippedNoPartner: 0 };
@@ -476,7 +616,7 @@ export async function runGapFillBatch(
       // `imported` számláló csak a ténylegesen létrejött/frissült
       // sorokat számolja, a `created`/`updated` delta alapján.
       const beforeSaved = syncResult.created + syncResult.updated;
-      await saveBillingoDocument(companyId, company, doc, syncResult, primaryAdvanceGlaCode);
+      await saveBillingoDocument(companyId, company, doc, syncResult, primaryAdvanceGlaCode, reverseChargeLookup);
       if (syncResult.created + syncResult.updated > beforeSaved) {
         state.result.imported += 1;
       }

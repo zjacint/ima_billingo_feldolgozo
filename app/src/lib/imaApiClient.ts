@@ -619,15 +619,6 @@ export async function pushSalesInvoiceRawAdd(
     };
   }
 
-  if (res.status === 409) {
-    return {
-      success: false,
-      duplicate: true,
-      imaInvoiceId: null,
-      error: "A számla korábban már be lett küldve (azonos külső azonosító + könyvelési dátum).",
-    };
-  }
-
   const bodyText = await res.text();
   let body: unknown = null;
   try {
@@ -636,34 +627,57 @@ export async function pushSalesInvoiceRawAdd(
     // hagyjuk null-on, alább HTTP-hiba vagy "váratlan válasz" üzenet lesz
   }
 
-  if (!res.ok || body == null) {
-    return {
-      success: false,
-      duplicate: false,
-      imaInvoiceId: null,
-      error: `IMA API HTTP ${res.status}: ${bodyText.slice(0, 500)}`,
-    };
-  }
-
-  const items = Array.isArray(body) ? body : [body];
+  // ⚠️ 2026.09.14-i élő megfigyelés: az IMA az üzleti hibát (pl.
+  // duplikált beküldés) UGYANABBAN a struktúrában adja vissza, mint a
+  // sikeres választ (`[{success, process, invoice_id, error}]`), csak épp
+  // NEM 2xx HTTP státusszal (a duplikáció esetén konkrétan HTTP 422-vel,
+  // NEM a korábban feltételezett 409-cel, ld. korábbi verzió git
+  // történet) — ezért a struktúrát MINDIG megpróbáljuk kiolvasni, nem csak
+  // `res.ok` esetén; a HTTP-státusz-alapú `!res.ok` ág csak akkor fut le,
+  // ha a válasz NEM ebben a struktúrában jött (pl. egy teljesen váratlan
+  // szerverhiba/HTML oldal).
+  const items = Array.isArray(body) ? body : body != null ? [body] : [];
   const item = items[0] as Record<string, unknown> | undefined;
-  if (!item) {
+
+  if (item && typeof item.success === "boolean") {
+    const success = item.success;
+    const invoiceId = item.invoice_id != null ? Number(item.invoice_id) : null;
+    const rawErrorMessage = success ? null : String(item.error ?? "Ismeretlen IMA hiba.");
+
+    // Duplikált beküldés felismerése a hibaszöveg ALAPJÁN (nem a HTTP
+    // státuszból) — ez a megbízhatóbb, mert a fenti tapasztalat szerint a
+    // státuszkód nem stabil/dokumentált erre az esetre. Tipikus üzenet:
+    // "Invoice already exists (SH_NO + PostingDate)." — jellemző oka:
+    // egy korábbi beküldési kísérlet IMA-oldalon ténylegesen létrehozta a
+    // bizonylatot, de a válasz valamiért (hálózati hiba, időtúllépés)
+    // nem ért vissza rendben hozzánk, ezért a helyi állapot `failed`
+    // maradt, és egy újraküldés ("Újraküldés IMA-nak") ugyanezzel az
+    // azonosítóval (`invoice_external_id`/SH_NO + `posting_date`) fut
+    // neki — ilyenkor a válasz `invoice_id` mezője `null` (nem tudjuk meg
+    // belőle a ténylegesen létrejött IMA-oldali azonosítót), tehát ez a
+    // beküldés NEM tud automatikusan "booked"-ra állni — a könyvelőnek
+    // kézzel kell ellenőriznie IMA-ban.
+    const duplicate = !success && /already exists/i.test(rawErrorMessage ?? "");
+
     return {
-      success: false,
-      duplicate: false,
-      imaInvoiceId: null,
-      error: "Üres/váratlan IMA válasz.",
+      success,
+      duplicate,
+      imaInvoiceId: Number.isFinite(invoiceId) ? invoiceId : null,
+      error: duplicate
+        ? "A számla már korábban létrejött IMA-ban (azonos külső azonosító + könyvelési dátum) — " +
+          "valószínűleg egy korábbi beküldési kísérlet IMA-oldalon sikeres volt, csak a válasz nem " +
+          "érkezett vissza rendben hozzánk. NE küldd újra vakon — ellenőrizd IMA-ban, hogy tényleg " +
+          "létrejött-e a bizonylat (a számla száma alapján kereshető), és ha igen, a helyi állapotot " +
+          "kézzel igazítsd hozzá. Eredeti IMA üzenet: " + rawErrorMessage
+        : rawErrorMessage,
     };
   }
-
-  const success = Boolean(item.success);
-  const invoiceId = item.invoice_id != null ? Number(item.invoice_id) : null;
 
   return {
-    success,
+    success: false,
     duplicate: false,
-    imaInvoiceId: Number.isFinite(invoiceId) ? invoiceId : null,
-    error: success ? null : String(item.error ?? "Ismeretlen IMA hiba."),
+    imaInvoiceId: null,
+    error: res.ok ? "Üres/váratlan IMA válasz." : `IMA API HTTP ${res.status}: ${bodyText.slice(0, 500)}`,
   };
 }
 

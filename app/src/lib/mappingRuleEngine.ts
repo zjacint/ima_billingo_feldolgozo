@@ -25,7 +25,7 @@ export interface MappingSuggestion {
   /** Külön ÁFA főkönyvi szám, megjelenítésre — ld. `MappingRule.vatGlaCode` doksztringje. */
   vatGlaCode: string | null;
   amountSign: AmountSign;
-  source: MappingRuleSource | "vat_mapping" | "advance_reference";
+  source: MappingRuleSource | "vat_mapping" | "advance_reference" | "cancellation_reference" | "modification_reference";
   confidence: number | null;
   /** A ténylegesen illeszkedő szabály azonosítója — "milyen szabály futott le rá" (ld. docs/tervezes.md 10.). */
   ruleId: string;
@@ -46,6 +46,7 @@ export function summarizeRuleConditions(rule: RuleLike & { partnerName?: string 
   if (rule.commentPattern) parts.push(`megjegyzés: „${rule.commentPattern}”`);
   if (rule.documentTypePattern) parts.push(`bizonylattípus: „${rule.documentTypePattern}”`);
   if (rule.vatPattern) parts.push(`áfa: „${rule.vatPattern}”`);
+  if (rule.amountSignPattern) parts.push(`előjel: ${rule.amountSignPattern === "positive" ? "pozitív" : "negatív"}`);
   return parts.join(" · ") || "—";
 }
 
@@ -61,6 +62,10 @@ export interface LineMatchContext {
   documentType: string;
   /** A Billingo `Vat` mező eredeti értéke (pl. "27%", "F.AFA"). */
   vatPercentOrCode: string;
+  /** A számlának van-e kapcsolódó elszámolt előlege (`Invoice.hasAdvanceSettlement`) — ld. előjel-alapú előleg-felülbírálás (`options.enableAdvanceSignOverride`). */
+  hasAdvanceSettlement?: boolean;
+  /** A tétel nettó összege negatív-e — ld. előjel-alapú előleg-felülbírálás. */
+  isNegativeAmount?: boolean;
 }
 
 /**
@@ -115,7 +120,19 @@ interface RuleLike {
   commentPattern: string | null;
   documentTypePattern: string | null;
   vatPattern: string | null;
+  amountSignPattern: string | null;
 }
+
+/**
+ * Azok a bizonylattípusok, ahol az összeg előjelének a JELENTÉSE megfordul
+ * vagy az eredetiből öröklődik (sztornó/helyesbítő — ld.
+ * `resolveInheritedLineMapping`) — ezeken az `amountSignPattern` feltétel
+ * SOSEM értékelődik ki (a szabály ilyen soron sosem nyerhet), könyvelői
+ * döntés, 2026.09.18: egy előjel-feltételes szabály csak a saját, szűken
+ * körülhatárolt helyzetében (pl. sima végszámla előleg-elszámolással)
+ * érvényes, sztornón az öröklés dönt, nem az (ott megfordult) előjel.
+ */
+const AMOUNT_SIGN_PATTERN_EXCLUDED_DOCUMENT_TYPES = new Set(["cancellation", "receipt_cancellation", "modification"]);
 
 /**
  * Megszámolja, hány feltétel van megadva a szabályon (specifikusság), és
@@ -150,6 +167,13 @@ export function matchRuleAgainstContext(
   if (rule.vatPattern) {
     specificity += 1;
     if (!matchesPattern(rule.vatPattern, context.vatPercentOrCode)) return { matches: false, specificity };
+  }
+  if (rule.amountSignPattern) {
+    specificity += 1;
+    if (AMOUNT_SIGN_PATTERN_EXCLUDED_DOCUMENT_TYPES.has(context.documentType)) return { matches: false, specificity };
+    if (context.isNegativeAmount == null) return { matches: false, specificity };
+    const contextSign = context.isNegativeAmount ? "negative" : "positive";
+    if (rule.amountSignPattern !== contextSign) return { matches: false, specificity };
   }
 
   if (specificity === 0) return { matches: false, specificity: 0 };
@@ -298,16 +322,27 @@ export async function resolvePrimaryAdvanceGlaCode(companyId: string): Promise<s
  * kiszámítani és átadni, hogy ne fusson le egy plusz DB-lekérdezés
  * SORONKÉNT; ha nincs átadva (`undefined`), a függvény maga számolja ki
  * (alacsonyabb hívásszámú helyeknek, pl. egyetlen sor felülvizsgálatánál).
+ *
+ * `options.enableAdvanceSignOverride` (ld. `Company.enableAdvanceSignOverride`,
+ * docs/tervezes.md 24. fejezet, könyvelői kérés 2026.09.17): a megjegyzés-
+ * alapú hivatkozás-felismerés MELLETT, KIEGÉSZÍTŐ jelként — ha a számlának
+ * van kapcsolódó elszámolt előlege (`context.hasAdvanceSettlement`) ÉS a
+ * tétel nettó összege negatív (`context.isNegativeAmount`), az is az
+ * elsődleges előleg főkönyvi számra terelődik, akkor is, ha a megjegyzés
+ * nem tartalmaz felismerhető hivatkozást. Csak akkor lép életbe, ha a
+ * megjegyzés-alapú felismerés MÉG NEM adott találatot — nem írja felül,
+ * csak kiegészíti azt.
  */
 export async function suggestMappingForLine(
   companyId: string,
   context: LineMatchContext,
-  options: { primaryAdvanceGlaCode?: string | null } = {}
+  options: { primaryAdvanceGlaCode?: string | null; enableAdvanceSignOverride?: boolean } = {}
 ): Promise<MappingSuggestion | null> {
   const standard = await computeStandardSuggestion(companyId, context);
 
   const isDirectAdvance = context.documentType === "advance";
   let isAdvanceReference = false;
+  let advanceReferenceSource: "comment" | "sign" | null = null;
   if (!isDirectAdvance) {
     const referencedNumber = parseAdvanceReferenceNumber(context.lineComment);
     if (referencedNumber) {
@@ -315,7 +350,19 @@ export async function suggestMappingForLine(
         where: { companyId, billingoDocumentNumber: referencedNumber },
         select: { invoiceType: true },
       });
-      isAdvanceReference = referencedInvoice?.invoiceType === "advance";
+      if (referencedInvoice?.invoiceType === "advance") {
+        isAdvanceReference = true;
+        advanceReferenceSource = "comment";
+      }
+    }
+    if (
+      !isAdvanceReference &&
+      options.enableAdvanceSignOverride &&
+      context.hasAdvanceSettlement &&
+      context.isNegativeAmount
+    ) {
+      isAdvanceReference = true;
+      advanceReferenceSource = "sign";
     }
   }
   if (!isDirectAdvance && !isAdvanceReference) return standard;
@@ -334,9 +381,106 @@ export async function suggestMappingForLine(
     ruleId: standard?.ruleId ?? "advance-reference",
     ruleSummary: isDirectAdvance
       ? "Előlegszámla — elsődleges előleg főkönyvi szám"
-      : "Előleg-hivatkozás a megjegyzésben — elsődleges előleg főkönyvi szám",
+      : advanceReferenceSource === "sign"
+        ? "Végszámla negatív (előleg-visszavonó) tétele — elsődleges előleg főkönyvi szám"
+        : "Előleg-hivatkozás a megjegyzésben — elsődleges előleg főkönyvi szám",
     inexactMatchField: standard?.inexactMatchField ?? null,
     inexactMatchValue: standard?.inexactMatchValue ?? null,
+  };
+}
+
+export interface InheritanceLookupItem {
+  productName: string;
+  quantity: number;
+  netAmount: number;
+}
+
+export interface InheritedLineMapping {
+  glaCode: string;
+  vatCode: string;
+  vatGlaCode: string | null;
+  amountSign: AmountSign;
+  source: "cancellation_reference" | "modification_reference";
+  ruleSummary: string;
+}
+
+/**
+ * Storno/helyesbítő számla tételéhez megkeresi az EREDETI (kapcsolódó)
+ * bizonylat AZONOS tételének jóváhagyott kontírját/áfa kódját — ld.
+ * docs/tervezes.md 24. fejezet, könyvelői kérés (2026.09.16-17): "ha a
+ * számla típusa stornó, akkor a tételek kontírozása azonos, mint a
+ * stornózott számlán elvégzett kontírozás... helyesbítő számla esetén az
+ * új tételek főkönyvi megfeleltetése azonos az eredeti számla adataival."
+ * Ez a normál `suggestMappingForLine`-tól FÜGGETLEN, KÜLÖN hívandó
+ * ellenőrzés (a hívó — `saveBillingoDocument`/`runRecomputeSuggestionsBatch`
+ * — ezt hívja ELŐSZÖR; ha nem-null eredményt ad, azt használja a normál
+ * javaslat HELYETT, nem mellette).
+ *
+ * Csak akkor ad vissza (nem-null) eredményt, ha MINDEN feltétel teljesül:
+ * - a megfelelő cégenkénti kapcsoló be van kapcsolva
+ *   (`enableCancellationInheritance`/`enableModificationInheritance`),
+ * - a bizonylatnak PONTOSAN EGY kapcsolódó bizonylata van
+ *   (`relatedDocumentIds.length === 1` — több kapcsolódó bizonylatnál a
+ *   "melyik tétel melyik eredetiből örököljön" kérdés bizonytalan, ezt
+ *   NEM próbáljuk feloldani),
+ * - a kapcsolódó bizonylat MEGVAN a mi adatbázisunkban (már szinkronizálva),
+ * - annak MEGFELELŐ tétele EGYÉRTELMŰEN (pontosan egy találat) párosítható
+ *   termékmegnevezés (pontos, kisbetűsített egyezés) + mennyiség + |nettó
+ *   összeg| alapján (a könyvelő megerősítése: "az összegek, a termék
+ *   megnevezése, mennyisége alapján alakítható ki"),
+ * - és annak a tételnek MÁR van jóváhagyott kontírja/áfa kódja
+ *   (`approvedGlaCode`/`approvedVatCode` — egy még jóvá nem hagyott
+ *   eredeti számlából nincs mit örökíteni).
+ *
+ * Bármilyen bizonytalanság (nincs kapcsolódó bizonylat, nincs/több
+ * találat, az eredeti tétel nincs jóváhagyva) esetén `null`-t ad — a hívó
+ * ilyenkor a normál szabály-illesztésre esik vissza (könyvelői döntés,
+ * 2026.09.17: "essen vissza a normál szabály-illesztésre" — a rendszer
+ * SOSEM találgat egy bizonytalan párosításnál).
+ */
+export async function resolveInheritedLineMapping(
+  companyId: string,
+  doc: { invoiceType: string; relatedDocumentIds: string[] },
+  item: InheritanceLookupItem,
+  options: { enableCancellationInheritance: boolean; enableModificationInheritance: boolean }
+): Promise<InheritedLineMapping | null> {
+  const isCancellation = doc.invoiceType === "cancellation" || doc.invoiceType === "receipt_cancellation";
+  const isModification = doc.invoiceType === "modification";
+  if (!isCancellation && !isModification) return null;
+  if (isCancellation && !options.enableCancellationInheritance) return null;
+  if (isModification && !options.enableModificationInheritance) return null;
+  if (doc.relatedDocumentIds.length !== 1) return null;
+
+  const original = await prisma.invoice.findUnique({
+    where: { companyId_billingoDocumentId: { companyId, billingoDocumentId: doc.relatedDocumentIds[0]! } },
+    select: { billingoDocumentNumber: true, billingoDocumentId: true, lines: true },
+  });
+  if (!original) return null;
+
+  const originalLines = original.lines as unknown as InvoiceLine[];
+  const targetName = item.productName.trim().toLowerCase();
+  const targetAbsNet = Math.abs(item.netAmount);
+  const matches = originalLines.filter(
+    (l) =>
+      l.productName.trim().toLowerCase() === targetName &&
+      l.quantity === item.quantity &&
+      Math.abs(Math.abs(l.netAmount) - targetAbsNet) < 0.01 &&
+      l.approvedGlaCode &&
+      l.approvedVatCode
+  );
+  if (matches.length !== 1) return null;
+  const match = matches[0]!;
+  const originalNumber = original.billingoDocumentNumber ?? original.billingoDocumentId;
+
+  return {
+    glaCode: match.approvedGlaCode!,
+    vatCode: match.approvedVatCode!,
+    vatGlaCode: match.approvedVatGlaCode,
+    amountSign: match.approvedAmountSign ?? "original",
+    source: isCancellation ? "cancellation_reference" : "modification_reference",
+    ruleSummary: isCancellation
+      ? `Stornó — az eredeti (${originalNumber}) számla azonos tételének kontírja`
+      : `Helyesbítő — az eredeti (${originalNumber}) számla azonos tételének kontírja`,
   };
 }
 

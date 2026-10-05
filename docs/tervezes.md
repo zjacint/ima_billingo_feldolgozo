@@ -1679,11 +1679,39 @@ megkülönböztetni, mert MINDKÉT variáns a rossz végpontra ment.
 - `buildRawInvoicePayload`: `invoice_source: null` mostantól EXPLICIT
   mezőként szerepel (a megerősített példa is így küldte, nem hiányzóként).
 
-### Nyitott, élő teszttel megerősítendő pontok
+### Élő teszttel megerősítve (2026.09.14)
 
-- Ez a javítás **még nem lett élőben visszatesztelve** — a következő
-  élesben próbált beküldésnél derül ki, hogy tényleg elkerüli-e az
-  `import_batch_id` hibát.
+Az első éles beküldés (2026.09.14, `billingo-ima-admin-00035-wb5` revízió)
+sikeres volt — a bizonylat ténylegesen létrejött IMA-ban, az
+`import_batch_id` hiba NEM jelentkezett. A gyökérok tehát valóban a hibás
+host/útvonal volt, a `partner_id` vs. `partner` objektum elmélet (12.
+fejezet) tévút volt.
+
+**Eközben talált, KÜLÖN hiba (ugyanebből a tesztből, javítva)**: az
+`invoice_external_id` mező az OpenAPI séma szerint `"SH_NO"` — ez NEM egy
+rejtett, csak duplikáció-védelemre szolgáló belső azonosító, hanem
+TÉNYLEGESEN ez jelenik meg az IMA felületén a bizonylat számaként ("Vevői
+szám" mező a Karton nézeten). A kód korábban `invoice.billingoDocumentId`-t
+(Billingo BELSŐ, numerikus dokumentum-azonosítója, pl. "134697529") küldte
+ide — az élő tesztben ez fiktív/értelmezhetetlen számként jelent meg
+IMA-ban, a Billingo valódi számlaszáma ("2026-4027") helyett. Javítva
+`invoiceWorkflow.ts` `submitInvoiceToIma`-ban:
+`invoiceExternalId: invoice.billingoDocumentNumber ?? invoice.billingoDocumentId`
+— a Billingo TÉNYLEGES számlaszáma megy ki, csak akkor esik vissza a belső
+ID-ra, ha az (elméletileg, nullable mező) hiányozna. A duplikáció-védelem
+(`invoice_external_id` + `posting_date`) szempontjából ez ugyanúgy
+megfelelő, mert a Billingo számlaszám is cégen belül egyedi és stabil.
+
+⚠️ **Ismert korlát**: a javítás csak az EZUTÁN beküldött számlákra
+vonatkozik — a már korábban (a hibás azonosítóval) sikeresen beküldött
+teszt-bizonylatokat (pl. a fenti KAMU1/KAMU2, illetve az első éles teszt)
+a rendszer NEM küldi újra automatikusan (nincs "számla-frissítés" végpont
+az IMA API-ban, és a helyi állapot is `booked`-ra vált sikeres beküldés
+után, ami nem jelölhető újraküldésre) — ezeket, ha szükséges, kézzel kell
+javítani/törölni IMA-oldalon.
+
+### Egyéb, nyitva maradt pontok
+
 - A megerősített email-példa több OPCIONÁLIS mezőt is küldött, amiket mi
   jelenleg nem küldünk (`customers_vat_number_eu`, `customers_is_person`,
   `customers_is_eu`, `customers_status`, `bank_account`,
@@ -1698,3 +1726,654 @@ megkülönböztetni, mert MINDKÉT variáns a rossz végpontra ment.
   szerinti OSS B2B/B2C megkülönböztetéshez (jelenleg csak azt nézzük, van-e
   EGYÁLTALÁN adószám, nem azt, hogy az konkrétan EU-formátumú-e) — később
   érdemes megvizsgálni, ha az OSS funkció élesedik.
+
+## 19. Adójogi megfelelőségi ellenőrzési pont (2026.09.13-i kiegészítés)
+
+Könyvelői kérés (2026.09.13): "A könyvelés során több olyan pont van, amit
+a kimenő számlák kapcsán ellenőrizni kell... szeretném megfogni, egy
+ellenőrzési pontot betenni a számlák feldolgozása, kontírozása és az IMA
+felé történő feladása előtt." Példaként hozott esetek: pénzforgalmi áfás
+jelzés kötelezettsége (jelenleg NEM implementált, ld. lent), fordított
+áfás kulcs magánszemély partnerhez, tagállam és tagállam-specifikus áfa
+kulcs párosítása, félreérthető puszta "0%" áfa érték (alanyi/tárgyi
+mentesség helyett), fordított áfás kulcs előlegszámlán.
+
+**Súlyosság — könyvelői döntés**: "figyelmeztetés, ahogy az árfolyam
+esetében is" — tehát PONTOSAN az `exchangeRateWarning`-gal (ld. 7.
+fejezet, `exchangeRate.ts`) azonos súlyosság: a számla `needs_review`
+állapotban marad (nem `synced`), tömeges jóváhagyásból (`bulkApproveInvoices`)
+kimarad — de EGYEDI jóváhagyást/beküldést NEM blokkol, a könyvelő szándékos
+felülbírálással jóváhagyhatja.
+
+**Ebben a körben implementált ellenőrzések** (a pénzforgalmi áfás eset
+KIVÉTELÉVEL — könyvelői döntés: "itt lesz több hasonló. Ez csak egy ötlet
+volt, ezt nem kell egyelőre a fejlesztésbe tenni."):
+
+1. Fordított áfás kulcs magánszemély partnerhez (nincs adószám).
+2. Fordított áfás kulcs előlegszámlán.
+3. Puszta "0%" áfa érték (nem elismert NAV-kód, ld. 2.1. fejezet) —
+   tisztázandó a pontos jogcím.
+
+**Áfa kulcs "fordított áfás"-ként való jelölése**: a meglévő, kézzel
+karbantartott `VatCodeMapping` (Billingo áfa érték → IMA áfa kód, ld. 8.3.
+fejezet) kapott egy új `isReverseCharge` (boolean, alapértelmezetten
+`false`) mezőt — NEM egy általános áfa-kategória enum, mert a jelenlegi
+ellenőrzésekhez ez elegendő, és túltervezés lenne egy általánosabb
+osztályozást bevezetni, amíg nincs rá konkrét igény. A Beállítások oldal
+ÁFA kulcs megfeleltetés táblázatában checkbox-szal szerkeszthető
+(`VatMappingSettings.tsx`).
+
+**Architektúra — szándékosan NEM egy általános szabály-motor**:
+`src/lib/invoiceCompliance.ts` néhány önálló, egymástól független ellenőrző
+függvényből áll (`isAmbiguousZeroPercent`, `checkLineCompliance`), nem egy
+konfigurálható keretrendszerből — a könyvelő jelezte, hogy idővel több
+hasonló ellenőrzés jön még (pl. a pénzforgalmi áfás eset), de azokat is
+inkább újabb, hasonlóan egyszerű, önálló függvényként érdemes hozzáadni.
+
+**Adatmodell**: `InvoiceLine.complianceWarnings: string[] | null` (JSON
+mező az `Invoice.lines`-on belül, ld. `types.ts`) — soronkénti, ember
+által olvasható figyelmeztetés-szövegek listája, `null`/üres, ha nincs
+probléma. `invoiceHasComplianceWarning(lines)` — `true`, ha legalább egy
+sornak van figyelmeztetése.
+
+**Bekötés** (ugyanaz a minta, mint `primaryAdvanceGlaCode`-nál — a
+számlán belül csomagonként/hívásonként EGYSZER lekérdezett, nem soronkénti
+DB-hívás):
+- `billingoSync.ts` `buildReverseChargeLookup` — cégenkénti
+  `VatCodeMapping` → `isReverseCharge` térkép, `runBillingoSyncBatch` ÉS
+  `runGapFillBatch` is lekéri egyszer csomagonként, `saveBillingoDocument`
+  soronként ebből néz vissza (pontos, nem normalizált `billingoVatValue`
+  egyezés — ugyanaz a konvenció, mint a `VatCodeMapping` áfa-kód-fallback
+  lookupnál, ld. `mappingRuleEngine.ts`).
+- `invoiceWorkflow.ts` `runRecomputeSuggestionsBatch` — ugyanez a lookup,
+  ugyanígy csomagonként egyszer.
+- A `status` számítás mindkét helyen kiegészült: `synced` csak akkor, ha
+  (a korábbi feltételek MELLETT) `!invoiceHasComplianceWarning(lines)` is
+  igaz — egyébként `needs_review`.
+- `bulkApproveInvoices` — az `exchangeRateWarning`-hoz hasonlóan, ha a
+  számla bármely során van `complianceWarnings`, a tömeges jóváhagyásból
+  kimarad (konkrét okkal a `results` tömbben), de az EGYEDI jóváhagyás
+  (`InvoiceDetail.tsx` "Jóváhagyás" gomb) nincs blokkolva.
+
+**UI**: `InvoiceDetail.tsx` — összesített (egyedi szövegű) figyelmeztetés-
+banner a fejlécben (mint az `exchangeRateWarning`), soronkénti kompakt ⚠
+jelzés (tooltippel) az Áfa kulcs (Billingo) oszlopban, és a teljes
+szöveg(ek) a sor-szerkesztő panelben (`LineEditModal`).
+
+**Migráció**: `20260913010000_vat_code_mapping_reverse_charge` —
+`VatCodeMapping.isReverseCharge Boolean @default(false)`.
+
+## 20. Duplikált IMA-beküldés felismerése (2026.09.14-i kiegészítés)
+
+Könyvelői jelzés: az IMA beküldés időnként ezzel a hibával hasal el:
+
+```
+IMA API HTTP 422: [{"success":false,"process":"insert","invoice_id":null,"error":"Invoice already exists (SH_NO + PostingDate)."}]
+```
+
+**A jelenség valószínű oka**: egy korábbi beküldési kísérletnél a bizonylat
+ténylegesen létrejött IMA-oldalon, de a válasz valamiért (hálózati hiba,
+időtúllépés) nem érkezett vissza rendben hozzánk — a helyi állapot ezért
+`failed` maradt, `imaSalesheaderId` nélkül. Egy újraküldés ("Újraküldés
+IMA-nak") ekkor ugyanazzal az `invoice_external_id`/SH_NO (ld. 18.
+fejezet, számlaszám-javítás) + `posting_date` párossal fut neki, amit az
+IMA duplikáció-védelme elutasít.
+
+**Addig talált hiba a felismerésben**: a kód korábban KIZÁRÓLAG a HTTP 409
+státuszt kezelte duplikációként (`pushSalesInvoiceRawAdd` korábbi
+verziója) — élő tapasztalat szerint viszont az IMA ezt a konkrét hibát
+**HTTP 422**-vel adja, a sikeres válasszal AZONOS JSON-struktúrában
+(`[{success, process, invoice_id, error}]`). A régi kód emiatt sosem
+ismerte fel a duplikációt, csak egy nyers HTTP-hibaszöveg-dumpot adott
+vissza (ld. a könyvelő idézett hibaüzenete).
+
+**Javítás** (`imaApiClient.ts` `pushSalesInvoiceRawAdd`):
+- A választ MINDIG megpróbáljuk a strukturált `{success, invoice_id,
+  error}` alakban értelmezni, függetlenül a HTTP-státusztól (nem csak
+  `res.ok` esetén) — a nyers HTTP-hiba-dump csak akkor marad, ha a válasz
+  NEM ebben az alakban jött (pl. valódi, váratlan szerverhiba).
+- A duplikáció felismerése a hibaszöveg TARTALMA alapján történik (`/already
+  exists/i` illeszkedés), NEM egy adott HTTP-státuszkódra hagyatkozva — ez
+  megbízhatóbb, mert a fenti tapasztalat szerint a státuszkód erre az
+  esetre nem stabil/dokumentált.
+- `ImaSalesInvoiceSubmitResult.duplicate: true` esetén az `error` mező egy
+  világos, magyar, a könyvelőnek szóló, cselekvésre ösztönző szöveget kap:
+  ne küldje újra vakon, ellenőrizze IMA-ban a bizonylat száma alapján, és
+  ha ott tényleg megvan, a helyi állapotot kézzel igazítsa hozzá.
+
+### Automatikus feloldás (2026.09.14, könyvelői pontosítás)
+
+A duplikáció-válasz `invoice_id` mezője valóban mindig `null`, DE a
+könyvelő jelezte, hogy van másik, alkalmas végpont: **NEM a `/nav`**
+(ott a még nem kontírozott, NAV-onlineból beérkezett bizonylatok is
+látszanának — hamis pozitív találat kockázata egy MÁS, még be sem küldött
+bizonylatra), hanem a **`/gladetails`** (Főkönyvi kivonat — csak a
+TÉNYLEGESEN kontírozott/könyvelt tételek) — ezt a végpontot az app már
+korábban is használja (`fetchImaGlaDetails`, ld. 12-13. fejezet), és a
+visszaadott `InvoiceNo` mezőt a `mappingRuleEngine.ts` már megbízhatóan,
+Billingo-formátumú számlaszámként kezeli kereszt-ellenőrzéshez — ugyanez a
+megbízhatóság vonatkozik erre a felhasználásra is.
+
+**Megvalósítás** (`invoiceWorkflow.ts` `tryReconcileDuplicateSubmission`,
+hívva `submitInvoiceToIma`-ból): ha a beküldés `duplicate: true`-t ad,
+lekérdezi a `/gladetails`-t a bizonylat dátumára szűkítve, megkeresi a
+számlaszámra illeszkedő sorokat, és a bennük szereplő `SalesHeaderID`-t
+veszi át — DE csak akkor fogadja el találatnak, ha MINDEN illeszkedő sor
+ugyanahhoz az egyetlen `salesHeaderId`-hez tartozik (nincs találat vagy
+ellentmondó azonosítók esetén `null`-t ad, nem találgat). Sikeres
+feloldásnál a számla ugyanúgy `booked` állapotba kerül, mintha a beküldés
+elsőre sikerült volna (a számlakép-csatolás és az IMA-partner
+visszaírás is lefut ilyenkor) — az audit napló `after` mezőjében
+`reconciledFromDuplicate: true` + az eredeti hibaüzenet is elmentve marad,
+hogy nyomon követhető legyen, mikor történt automatikus feloldás.
+
+Ha a feloldás bizonytalan (nincs egyértelmű találat), a számla a korábbi
+(fenti) "ellenőrizd kézzel IMA-ban" üzenettel `failed` marad — ez a
+biztonsági háló, hogy soha ne kössünk össze egy helyi számlát egy
+bizonytalanul azonosított IMA-oldali bizonylattal.
+
+**Nyitott pont**: ez a mechanizmus még nem lett élőben tesztelve —
+az első ténylegesen előforduló duplikáció-eset mutatja meg, hogy a
+`/gladetails` válasz dátum-mezői (a séma dokumentációja bizonytalan
+típusúnak írja le őket) valóban a várt módon viselkednek-e a kérésben
+használt `from-date`/`until-date` szűréssel.
+
+### Kiegészítés: PROAKTÍV előzetes ellenőrzés beküldés előtt (2026.09.18)
+
+Élő tapasztalat (könyvelői jelzés): "egy csomónál úgy volt, hogy már
+könyvelt állapotú volt [IMA-ban], de mi átküldtük" — a fenti mechanizmus
+eddig csak REAKTÍV volt (az IMA-tól kapott "already exists" hibára
+válaszul futott le). Könyvelői kérés: ellenőrizzük ezt MÁR A BEKÜLDÉS
+ELŐTT is, ne csak utólag a hibaüzenetre reagálva — egyrészt hogy
+elkerüljük a felesleges/esetlegesen IMA-oldali duplikátumot okozó
+API-hívást, másrészt mert nem garantált, hogy IMA minden ilyen esetben
+ténylegesen elutasítja duplikátumként (attól függően, mennyire pontosan
+egyezik az `invoice_external_id`/`posting_date`).
+
+**Megoldás** (`submitInvoiceToIma`): a TÉNYLEGES `pushSalesInvoiceRawAdd`
+hívás ELŐTT lefut ugyanaz a `tryReconcileDuplicateSubmission` (`/gladetails`
+alapú) keresés, amit eddig csak a duplikáció-hiba UTÁN hívtunk. Ha talál
+egyértelmű találatot, a számla EGYÁLTALÁN NEM kerül újra beküldésre —
+egyből `booked` állapotba kerül a felismert `imaSalesheaderId`-vel (fut
+rá a partner-visszaírás és a számlakép-csatolás is, ugyanúgy, mintha
+sikeres beküldés lett volna). Ha a preflight ellenőrzés nem talál semmit,
+a normál beküldés fut, a REAKTÍV (post-hoc) duplikáció-feloldás pedig
+megmarad változatlan biztonsági hálóként (elméleti él-eset: a bizonylat
+PONT a preflight ellenőrzés és a tényleges beküldés között jön létre
+IMA-ban, valamilyen más úton).
+
+Az audit napló (`ima_push` esemény) `preFlightMatch: true` jelzővel
+különbözteti meg ezt az esetet a normál sikeres beküldéstől és a
+reaktív (`reconciledFromDuplicate: true`) feloldástól.
+
+## 21. Tételsor nettó+áfa=bruttó konzisztencia garantálása (2026.09.14-i kiegészítés)
+
+Könyvelői jelzés: "a számla tételek összesen és a számla fejlécének adatai
+nem egyezőek. Ugye a számla egy szigorú adattartalmú dokumentum. A számla
+tételeinél a nettó és az áfa összegének ki kell adnia a bruttó sor
+értékeket. A sorok nettó értékeinek a számla összesen nettóját. Az áfa és a
+bruttó esetében is ez a helyzet."
+
+**A jelenség oka**: a Billingo API néhol egymástól FÜGGETLENÜL kerekített
+nettó/áfa/bruttó tétel-mezőket ad vissza (pl. az egységár alapján
+számolt nettó, a nettó×kulcs alapján számolt áfa, és a bruttó mindegyike
+külön kerekítve) — ez ritkán, kerekítési határeseteknél 1 egységnyi
+(fillér/forint) eltérést okozhat a nettó+áfa=bruttó összefüggésben, amit a
+kód eddig változtatás nélkül, egy az egyben továbbadott az IMA-beküldésben
+is. Az áfa törvény szerint ez az összefüggés MINDIG kötelező egy
+bizonylat tételsorán.
+
+⚠️ **Fontos tervezési pontosítás (könyvelő, ugyanaznap, az első
+implementáció UTÁN)**: az első verzió a fejléc-összesítőt a (soronként már
+konzisztensre hozott) TÉTELSOROK összegéből számolta újra — ez a
+könyvelő szerint HIBÁS irány: "nem a sorokból számolunk. Hanem a fejléc
+adatával kell azonosnak lenni a soroknak. Tehát az összesen adat, ami a
+számla fejből érkezik, az a fix. A sorokat lehet mozgatni." Vagyis a
+Billingo dokumentum FEJLÉC-összesítője (nem eddig kiolvasott mező volt!)
+az irányadó, MEGVÁLTOZTATHATATLAN — a sorok (pontosabban: az esetleges
+kerekítési maradék) igazodnak hozzá, nem fordítva.
+
+**Megoldás, két lépésben** (`src/lib/amountReconciliation.ts`, új fájl):
+1. `reconcileLineAmounts(netAmount, vatAmount, grossAmount)` — EGYETLEN
+   tételsor saját nettó+áfa=bruttó konzisztenciáját garantálja: a nettó és
+   a bruttó értéket tekinti irányadónak (a tétel szintjén ezek a
+   legmegbízhatóbb, egységár-alapú számok), az áfát ebből származtatja
+   (`bruttó - nettó`). Visszaadja, hogy történt-e érdemi korrekció
+   (`corrected: boolean`), ami naplózásra kerül.
+2. `reconcileLinesToHeaderTotal(lines, header)` — a (fentebb már
+   soronként konzisztens) sorok ÖSSZEGÉT igazítja a bizonylat FEJLÉC-
+   összesítőjéhez (`header.netAmount`/`vatAmount`/`grossAmount`) — a
+   maradék (kerekítési) különbözetet az UTOLSÓ tételsorra tolja rá
+   (szokásos könyvelési gyakorlat: "kerekítési különbözet"). A három
+   maradék (nettó/áfa/bruttó) matematikai okból mindig konzisztens
+   egymással, ezért a korrigált utolsó sor is megtartja saját nettó+áfa=
+   bruttó konzisztenciáját.
+
+**A fejléc-összesítő forrása** (`billingoApiClient.ts`
+`BillingoDocument.netTotal`/`vatTotal` — ÚJ mezők, korábban a kód csak
+`gross_total`-t olvasta ki a dokumentumból, a `summary.net_amount`/
+`summary.vat_amount`-ot NEM): a Billingo `Document.summary` objektuma
+(`DocumentSummary` séma, `docs/billingo-api/openapi.yaml`) adja a
+`net_amount`/`vat_amount`-ot, a `gross_total` pedig közvetlenül a
+dokumentumon van. Ha a `summary` valamiért hiányzik (nem várt), a kód
+defenzíven a sorok összegére esik vissza.
+
+**Bekötve KÉT ponton** (védőháló mindkét irányban):
+1. `billingoSync.ts` `saveBillingoDocument` — a szinkron pontján: minden
+   tételre lefut az 1. lépés, majd a teljes sor-tömbre a 2. lépés a
+   Billingo fejléc-összesítőhöz igazítva, MIELŐTT az adatbázisba kerülne.
+   Az `Invoice.netAmount`/`vatAmount`/`grossAmount` MOSTANTÓL közvetlenül
+   a Billingo fejléc-összesítő (FIX érték), NEM a sorok összege. Ha a
+   sorok és a fejléc-összesítő közti korrekció 1 egységnél nagyobb, az
+   már valószínűleg NEM egyszerű kerekítés, hanem komolyabb adateltérésre
+   utalhat (pl. hiányzó tétel) — ez csak naplózásra kerül, a szinkront
+   nem blokkolja.
+2. `invoiceWorkflow.ts` `submitInvoiceToIma` — közvetlenül a tényleges
+   IMA-export ELŐTT, védőhálóként ugyanezt a két lépést újra elvégzi a MÁR
+   a DB-ben tárolt (esetleg e javítás ELŐTT szinkronizált, még
+   inkonzisztens) sorértékekre is, a tárolt `Invoice.netAmount`/
+   `vatAmount`/`grossAmount`-hoz igazítva — így a ténylegesen kiküldött
+   adat garantáltan konzisztens, függetlenül attól, mikor lett a számla
+   szinkronizálva. Az `approvedAmountSign: negative` felülbírálás (ld. 9.2
+   fejezet) ezután, KÜLÖN lépésben történik — a ténylegesen beküldött
+   fejléc-bruttó összeget ILYENKOR is a beküldött (előjel-korrigált)
+   sorokból számolja újra a kód, mert ez a felülbírálás szándékosan
+   MEGVÁLTOZTATJA az effektív végösszeget a Billingo-fejléchez képest.
+
+### Utólagos javítás: a fejléc-összesítő MAGA is lehet inkonzisztens (2026.09.14, még aznap)
+
+Élő teszt után az IMA a beküldést elutasította: `"Explicit line amounts
+are inconsistent"` — pontosan azon a soron, ami a fejezet elején is
+példaként szerepelt. Kiderült: a fenti javítás egy hallgatólagos
+feltevésre épített — hogy a Billingo fejléc-összesítője
+(`summary.net_amount` + `summary.vat_amount`) MINDIG pontosan kiadja a
+`gross_total`-t. Ez NEM garantált — a fejléc-összesítő MAGA is
+ugyanannak az egymástól független kerekítésnek lehet kitéve, mint a
+tételsorok (ld. fejezet eleje). Ha a fejléc-célérték maga inkonzisztens,
+a hozzá igazított (utolsó) sor is inkonzisztens marad — pontosan ezt a
+hibát dobta vissza IMA.
+
+**Javítás**: a fejléc-összesítőt MOST MÁR a sorok elé igazítás ELŐTT a
+`reconcileLineAmounts`-szal (nettó+bruttó irányadó, áfa ebből
+származtatva) magát is konzisztensre hozzuk — mind `billingoSync.ts`
+`saveBillingoDocument`-ben (ez lesz az `Invoice.netAmount`/`vatAmount`/
+`grossAmount`, amit tárolunk), mind `invoiceWorkflow.ts`
+`submitInvoiceToIma`-ban (védőhálóként a már tárolt, esetleg e javítás
+előtti fejléc-értékekre is). Ezzel a korábbi matematikai garancia (a
+maradék mindhárom értéknél konzisztens, ezért a korrigált utolsó sor is
+az marad) ténylegesen is teljesül, nem csak feltételezetten.
+
+## 22. Könyvelt számlák IMA-egyeztetése (2026.09.14-i kiegészítés)
+
+Könyvelői kérés: "most töröltem az összes bizonylatot, amit átadtunk az
+IMA-ba. Készítsünk egy olyan ellenőrzést, ami lekérdezi az IMA-ból, hogy
+mi az utolsó számla keltű és sorszámú számla, amit importáltunk, és ennek
+megfelelően engedi a bizonylatokat importálni. Tehát ami nincs az
+IMA-ban, azt annál ne legyen könyvelt/IMA-ba átadott a státusz."
+
+**Tervezési döntés — nem "utolsó számla" küszöb, hanem EGYENKÉNTI
+meglét-ellenőrzés**: egyetlen "utolsó IMA-sorszám" küszöbérték nem
+kezelné helyesen a több számlatömb (eltérő prefixű számlaszám-sorozat)
+esetét — könyvelői aggály: "figyelnünk kell a számlákat akkor is, ha több
+számlatömb van a számlázóban... az app-nak fel kell ismernie." Emiatt a
+megvalósítás EGYENKÉNT, a tényleges számlaszám alapján ellenőriz minden
+helyileg `booked` számlát — ez a megközelítés a számlatömbök/prefixek
+számától FÜGGETLENÜL helyesen működik, nem kell külön logika a több
+számlatömb felismerésére (ugyanez az elv már eddig is működött a
+hiányzó-számlaszám-ellenőrzésnél, ld. `invoiceNumberGaps.ts`
+`findInvoiceNumberGaps` — prefixenkénti csoportosítás).
+
+**Megvalósítás** (`invoiceWorkflow.ts` `reconcileBookedInvoicesWithIma`,
+`POST /api/companies/[companyId]/reconcile-ima-booked`, gomb:
+"Könyvelt számlák egyeztetése IMA-val" a Vezérlőpulton, ld. könyvelői
+kérés: "akár ezt egy külön gombra is ki lehetne tenni"):
+- Lekéri az összes helyileg `booked` számlát, meghatározza a kelt-
+  dátumaik (docDate) minimumát/maximumát.
+- EGYETLEN `/gladetails` (Főkönyvi kivonat — csak TÉNYLEGESEN
+  kontírozott/könyvelt tételek, ugyanaz az `invoiceNo` mező, amit a 20.
+  fejezet szerinti duplikáció-feloldás is megbízhatóan használ) hívással
+  lekéri az ebben a dátumtartományban IMA-oldalon ténylegesen meglévő
+  számlaszámokat. Szándékosan NEM a `/nav` végpontot használja — ott a
+  még nem kontírozott, NAV-onlineból beérkezett bizonylatok is
+  szerepelnének, ami hamis "megvan" eredményt adna.
+- Minden helyi `booked` számlát, aminek a számlaszáma NEM szerepel a
+  visszakapott listában, visszaállít `approved` státuszra (törli az
+  `imaSalesheaderId`-t, magyarázó `imaPushError`-t ír) — ez a normál
+  "Beküldés IMA-nak" úton újra beküldhetővé teszi, immár a 20. fejezet
+  szerinti duplikáció-feloldással és a 21. fejezet szerinti összeg-
+  korrekcióval együtt.
+
+**Ismert korlát**: egyetlen kéréssel fut (nem a csomagolt/folytatható
+mintát követi, mint a Billingo-szinkron) — nagyon nagy (több ezres)
+könyvelt-számla-állománynál ez érdemben lassulhat/időtúllépést okozhat,
+ez esetben érdemes lesz utólag csomagolt (cursor-alapú) mintára váltani,
+de ez jelenleg (a várható adatmennyiség mellett) nem indokolt.
+
+## 23. Tervezett, KÉSŐBBI körre halasztott fejlesztések (2026.09.16-i kiegészítés)
+
+Egy másik Claude-munkamenetben készült koncepció-összefoglaló (három
+projektet — `<another-sibling-project>`, `ima_billingo_feldolgozo` [ez a repó]
+és egy harmadik testvérprojekt — átfogó könyvelés-ellenőrző/audit
+ügynökrendszer tervéről) két, kifejezetten ide vonatkozó hiányt azonosított. Könyvelői
+döntés: ezek FELVÉTELRE kerülnek a tervbe, de EBBEN a körben NEM kerülnek
+lefejlesztésre — a KÖVETKEZŐ fejlesztési kör feladatai.
+
+### 23.1. `MappingRule` időbeli verziózása (`effective_from`/`effective_to`)
+
+Jelenleg egy `MappingRule` "örökéletű" — nincs érvényességi ablaka. Ez
+jogszabály-változásnál (pl. áfa kulcs módosul) vagy számlatükör-váltásnál
+problémás: egy régi szabály csendben felülírhatja/érvényben maradhat egy
+olyan időszakra is, amire már nem helyes. Tervezendő: `effective_from`/
+`effective_to` (nullable dátum-mezők) a `MappingRule`-on, a javaslati
+motor (`suggestMappingForLine`, `mappingRuleEngine.ts`) a számla
+kelt-dátuma alapján csak az adott időpontban érvényes szabályokat vegye
+figyelembe.
+
+### 23.2. Szabályonkénti/cégenkénti javaslat-elfogadási arány mérése
+
+Jelenleg a `suggestedRuleId`/`suggestedRuleSummary` (a javasolt szabály)
+mentődik egy tételsoron, de a ténylegesen jóváhagyott (esetleg kézzel
+felülbírált) kontír/áfa érték nincs úgy eltárolva, hogy utólag
+számolható legyen: egy adott szabályt milyen arányban fogadják el
+változtatás nélkül, vs. milyen arányban írják felül. Ez governance-
+alapot adna (mely szabályok megbízhatóak, melyeket érdemes felülvizsgálni)
+— és ugyanez az adat egy jövőbeli audit-réteg visszacsatolásához
+(`alert_outcomes`-szerű tábla) is kellene, érdemes egy helyen tárolni.
+Tervezendő: az `approveInvoice`/`bulkApproveInvoices` mentse el
+soronként, hogy a jóváhagyott érték egyezett-e a javasolttal (pl. egy
+`MappingRuleApplicationLog`-szerű tábla, vagy egyszerűbben egy
+számított/aggregált nézet a meglévő adatokból).
+
+**Ebben a körben NEM készült el kód/migráció ezekhez** — csak a terv
+rögzítése volt a cél.
+
+## 24. Dokumentum-kapcsolatot figyelembe vevő kontír-felülbírálás (2026.09.16-17-i kiegészítés)
+
+Könyvelői felismerés: a kontírozási szabályok eddig a számla EGÉSZÉT és a
+tételeket EGYENKÉNT vizsgálták, de a tételek/bizonylatok közti
+KAPCSOLATOT nem. Két konkrét eset:
+
+1. "A végszámlán vannak plusz és mínusz összegű tételek. Értelemszerűen a
+   negatív összegek a korábbi előlegek visszavonása, a pozitív a
+   szolgáltatás számlázása. Ilyenkor a kontírozás a negatív tételekre az
+   előleg főkönyvi számot, a pozitív az árbevétel főkönyvi számot
+   érinti."
+2. "Ha a számla típusa stornó, akkor a tételek kontírozása azonos, mint a
+   stornózott számlán elvégzett kontírozás." — pontosítás: "a stornó
+   számla egy-egy kapcsolata az összegek, a termék megnevezése,
+   mennyisége alapján alakítható ki." A helyesbítő (módosító) számlára
+   ugyanez vonatkozik, csak "nehezebb a megfeleltetés" — "helyesbítő
+   számla esetén az új tételek főkönyvi megfeleltetése azonos az eredeti
+   számla adataival."
+
+Ez architekturálisan ugyanaz a mintázat, mint a meglévő "előleg-
+felülbírálás" (ld. 9.5. fejezet, `mappingRuleEngine.ts` `parseAdvanceReferenceNumber`/
+`suggestMappingForLine`) — egy KAPCSOLÓDÓ bizonylatra hivatkozva dönt a
+kontírról, a normál szabály-illesztést megkerülve — ezért ennek
+kiterjesztéseként épült fel, NEM új alrendszerként.
+
+### Adatmodell
+
+- `Invoice.relatedDocumentIds: String[]` (új mező) — a Billingo
+  `related_documents` tömb (`DocumentAncestor` séma: `{id,
+  invoice_number}`) elemeinek TÉNYLEGES Billingo dokumentum-azonosítói.
+  Eddig csak a `hasAdvanceSettlement` boolean tárolta, hogy VAN-e
+  kapcsolódó bizonylat, a konkrét azonosítót nem — enélkül nem lehetett
+  visszakeresni a KONKRÉT eredeti bizonylatra. `billingoApiClient.ts`
+  `BillingoDocument.relatedDocumentIds` a forrás.
+- `Company.enableAdvanceSignOverride` / `enableCancellationInheritance` /
+  `enableModificationInheritance` (Boolean, `@default(false)`) — cégenként
+  KÜLÖN kapcsolható mindhárom mechanizmus (könyvelői döntés: "egyenként,
+  külön kapcsolóval" — ha valamelyik egy adott cégnél nem működik jól, a
+  többi továbbra is használható). Alapértelmezetten KIKAPCSOLVA — új,
+  automatikus kontír-viselkedés, tudatos bekapcsolás szükséges (ld. 19.
+  fejezet "javaslat, ne autonóm döntés" elve).
+- Migráció: `20260917183210_special_override_settings`.
+
+### 1. Előjel-alapú előleg-felülbírálás (`enableAdvanceSignOverride`)
+
+`mappingRuleEngine.ts` `suggestMappingForLine` meglévő "Előleg-
+felülbírálás" lépése bővült: a megjegyzés-alapú hivatkozás-felismerés
+(`parseAdvanceReferenceNumber`) MELLETT, KIEGÉSZÍTŐ jelként — ha a
+számlának van kapcsolódó elszámolt előlege (`context.hasAdvanceSettlement`)
+ÉS a tétel nettó összege negatív (`context.isNegativeAmount`), az is az
+elsődleges előleg főkönyvi számra (ld. 9.5. fejezet) terelődik. Csak akkor
+lép életbe, ha a megjegyzés-alapú felismerés MÉG NEM adott találatot — nem
+írja felül, csak kiegészíti azt.
+
+### 2-3. Stornó/helyesbítő öröklés (`enableCancellationInheritance`/`enableModificationInheritance`)
+
+Új, önálló függvény: `mappingRuleEngine.ts` `resolveInheritedLineMapping(companyId,
+doc, item, options)` — a normál szabály-illesztéstől FÜGGETLEN, KÜLÖN
+hívandó ellenőrzés, amit a hívó (`saveBillingoDocument`/
+`runRecomputeSuggestionsBatch`) ELŐSZÖR hív; ha nem-null eredményt ad, azt
+használja a normál javaslat HELYETT.
+
+Csak akkor ad vissza (nem-null) eredményt, ha MINDEN feltétel teljesül:
+- a megfelelő cégenkénti kapcsoló be van kapcsolva,
+- a bizonylatnak PONTOSAN EGY kapcsolódó bizonylata van
+  (`relatedDocumentIds.length === 1` — több kapcsolódó bizonylatnál a
+  "melyik tétel melyik eredetiből örököljön" kérdés bizonytalan, ezt NEM
+  próbáljuk feloldani),
+- a kapcsolódó bizonylat MEGVAN a mi adatbázisunkban (már szinkronizálva),
+- annak MEGFELELŐ tétele EGYÉRTELMŰEN (pontosan egy találat) párosítható
+  termékmegnevezés (pontos, kisbetűsített egyezés) + mennyiség + |nettó
+  összeg| alapján (könyvelői megerősítés: "az összegek, a termék
+  megnevezése, mennyisége alapján alakítható ki"),
+- és annak a tételnek MÁR van jóváhagyott kontírja/áfa kódja
+  (egy még jóvá nem hagyott eredeti számlából nincs mit örökíteni).
+
+**Bizonytalan párosítás esetén** (nincs kapcsolódó bizonylat, nincs/több
+találat, az eredeti tétel nincs jóváhagyva): `null`-t ad — a hívó a normál
+szabály-illesztésre esik vissza. Könyvelői döntés (2026.09.17, a két
+lehetőség közül): "essen vissza a normál szabály-illesztésre" — a
+rendszer SOSEM találgat egy bizonytalan párosításnál (a "legjobb
+becslés + figyelmeztetés" alternatíva elvetve).
+
+A `MappingSuggestion.source`/`InvoiceLine.suggestedRuleSource` unió bővült
+`"cancellation_reference"`/`"modification_reference"` értékekkel —
+`StatusBadge.tsx` `MappingRuleSourceBadge` "Stornó öröklés"/"Helyesbítő
+öröklés" címkével jeleníti meg.
+
+### UI
+
+A Kontír/áfa szabályok oldalon új kártya (`SpecialOverrideSettings.tsx`):
+"Speciális felülbírálási szabályok" — mindhárom mechanizmus külön
+checkboxszal ki/bekapcsolható. Nincs "szerkeszthető" tartalmuk (nem egy
+`MappingRule`-hoz hasonló, szabadon definiálható feltétel/kimenet pár) —
+a céljuk (melyik főkönyvi számra menjen) vagy előre rögzített (az
+elsődleges előleg főkönyvi szám), vagy magából az eredeti bizonylatból
+származik (öröklés), ezért a felület egyszerű kapcsolókból áll, nem
+szabály-szerkesztőből. Mentés a meglévő `PATCH /api/companies/[companyId]/settings`
+végponton (bővített Zod séma).
+
+**Ismert korlát/nyitott pont**: még nincs élőben tesztelve — az első
+tényleges stornó/helyesbítő/végszámla-előleg eset mutatja meg, hogy a
+Billingo `related_documents`/tétel-párosítás a gyakorlatban is a várt
+módon viselkedik-e.
+
+### Elvetett/később megfontolandó ötlet: "0%" figyelmeztetés + `VatCodeMapping`
+
+Könyvelői felvetés: ha egy cég szisztematikusan hibás (pl. "0%") áfa
+kulccsal állít ki számlát, automatikusan lehessen ezt a KÖNYVELÉS felé
+javítani. Ez a képesség MÁR MEGVAN — a `VatCodeMapping` (Beállítások,
+ÁFA kulcs megfeleltetés) pontosan ezt csinálja (Billingo "0%" → IMA
+"AM"/"TAM"). Azonosított, EBBEN a körben MÉG NEM javított hiányosság: a
+19. fejezet szerinti "félreérthető 0%" megfelelőségi figyelmeztetés
+(`isAmbiguousZeroPercent`) tisztán szövegesen néz, akkor is jelez, ha már
+be van állítva a fenti megfeleltetés — pedig ilyenkor a könyvelő tudatos
+döntése miatt már nem félreérthető. Érdemes lenne a figyelmeztetést
+kiegészíteni: ne jelezzen, ha az adott Billingo áfa értékre már van
+explicit `VatCodeMapping`.
+
+## 25. Partner-készenlét: magánszemély vs. vállalkozás megkülönböztetése (2026.09.17-i kiegészítés)
+
+Könyvelői visszajelzés: a tömeges jóváhagyást blokkolta a "hiányzik az
+adószám vagy a teljes cím" hiba egy olyan partnernél, akinél ez nem
+lenne gond — "ha nem talál egy partnert, akkor újat hoz létre." Ellenőrzés
+(`buildRawInvoicePayload`, imaApiClient.ts): az IMA automatikus partner-
+létrehozás payload-jában az adószám (`customers_vat_number`) TÉNYLEGESEN
+opcionális — csak a cím kötelező a `partner: {...}` úthoz. A régi
+`isPartnerReadyForSubmission` viszont MINDKETTŐT (adószám ÉS teljes cím)
+megkövetelte — ez főleg magánszemély (definíció szerint adószám nélküli)
+partnereknél blokkolt feleslegesen.
+
+Könyvelői pontosítás a javaslatra ("csak a cím legyen kötelező"): "itt a
+partner típus a fontos. Ha magánszemélynek állítjuk ki a számát csak a
+cím kötelező, az adószám csak vállalkozások esetén megadandó adat." —
+tehát nem egyszerűen elhagyni kell az adószám-követelményt, hanem a
+partner TÍPUSA szerint kell dönteni.
+
+**Megoldás — `Partner.taxType` (új mező, Billingo `tax_type`)**: a
+korábbi kód a magánszemély-besoroláshoz több helyen (`invoiceCompliance.ts`
+`partnerIsPrivateIndividual`, `ossThreshold.ts` `isOssRelevantPartner`) az
+adószám ÜRES voltából következtetett — ez hibás lehet, mert egy
+VÁLLALKOZÁSNÁL a hiányzó adószám lehet egyszerű Billingo-oldali adathiány
+is, nem feltétlenül magánszemély. A Billingo API viszont explicit
+mezőt ad erre: `tax_type` (`"" | "FOREIGN" | "HAS_TAX_NUMBER" |
+"NO_TAX_NUMBER"`, ld. `docs/billingo-api/openapi.yaml`
+`PartnerTaxType`) — ez a partner Billingo-oldali, tudatos besorolása,
+megbízhatóbb, mint az adószám-mező kitöltöttségéből találgatni.
+
+`types.ts` `isPartnerPrivateIndividual(partner)` — új, megosztott
+segédfüggvény: `taxType === "NO_TAX_NUMBER"` esetén magánszemély; ha a
+`taxType` még nincs kitöltve (régebbi, e mező bevezetése ELŐTTI
+szinkronból származó adat), a régi heurisztikára (nincs adószám) esik
+vissza. Ezt használja most MINDHÁROM korábbi hely
+(`isPartnerReadyForSubmission`, `invoiceCompliance.ts` hívói,
+`isOssRelevantPartner`) — egy helyen javítva mindenhol konzisztens.
+
+`isPartnerReadyForSubmission` új logikája: a TELJES CÍM mindig kötelező
+(ismert IMA-partner hiányában); az ADÓSZÁM csak akkor, ha a partner NEM
+magánszemély (`isPartnerPrivateIndividual` alapján) — egy ismert
+`taxType: "NO_TAX_NUMBER"` partner (vagy egy régi, `taxType` nélküli,
+adószám nélküli sor) a teljes címmel önmagában átmegy az ellenőrzésen.
+
+**Migráció**: `20260917192156_partner_tax_type` — `Partner.taxType
+String?`. A meglévő partnerek `taxType`-ja `NULL` marad, amíg újra nem
+szinkronizálódnak (ekkor a régi heurisztikára esik vissza — a viselkedés
+a meglévő adatokra NEM változik meg automatikusan, csak az ÚJ szinkron
+után frissülő partnereknél).
+
+## 26. Számlák oldal/számla-részletező kisebb kiegészítések (2026.09.17-i kiegészítés)
+
+Könyvelői kérések, migráció NÉLKÜL:
+
+- **Számla típusa a részletezőn**: a számla-részletező fejlécében mostantól
+  badge-ként megjelenik a bizonylat típusa (Előlegszámla/Végszámla/Normál
+  számla/stb., ld. `invoiceKindLabel`) — eddig csak a listaoldalon volt
+  látható.
+- **Szűrés típusra**: a Számlák oldal szűrőjéhez új "Típus" legördülő
+  került (ugyanazok a kategóriák, mint az `invoiceKindLabel` — mivel a
+  "Végszámla" nem önálló DB-érték, hanem `invoiceType === "invoice" &&
+  hasAdvanceSettlement`, a szűrő ezt a kombinációt fordítja vissza
+  where-feltétellé).
+- **Visszalépés jóváhagyás/elutasítás után**: a számla-részletezőn a
+  "Jóváhagyás"/"Elutasítás" gomb sikeres művelet után a számlalistára
+  navigál vissza (a meglévő `returnTo`/`backHref` mechanizmussal, ld. 21.
+  fejezet előtti UI-javítás — megőrzi a lista szűrő-/lapozás-állapotát) —
+  eddig a helyben maradt, csak `router.refresh()`-elt.
+- **Állítható oszlopok**: a Számlák táblázatán új "Oszlopok" gomb — a
+  Számlaszám és a művelet-oszlop KIVÉTELÉVEL minden oszlop (Partner,
+  Teljesítés dátuma, Nettó, Áfa, Bruttó, Típus, Devizanem, Státusz)
+  egyenként ki/bekapcsolható. KIZÁRÓLAG a néző böngészőjében tárolt
+  beállítás (`localStorage`), nem megosztott/szerver-oldali adat.
+- **Kiegyenlítési (Stripe) CSV export elrejtve**: könyvelői kérés — "erre
+  lesz külön ötletem" — a `SettlementExportControls` komponens és a
+  mögötte lévő logika (`settlementExport.ts`,
+  `/api/companies/[companyId]/settlement-export`) VÁLTOZATLANUL megvan,
+  csak a Számlák fülön nem jelenik meg a `CompanyInvoicesPage`-ből
+  eltávolítva a renderelés/adatlekérdezés.
+
+### Nyitva maradt, még nem implementált ötlet
+
+Könyvelői felvetés: legyen lehetőség a számla-részletezőn is TÖMEGESEN
+(nem csak egyenként, a `LineEditModal`-lal) beállítani a tételsorok
+kontírját/áfa kódját — hasonlóan a listaoldal `BulkMappingModal`-jához,
+csak az adott számla soraira szűkítve. Ez technikailag megvalósítható
+(ugyanaz a minta újrafelhasználható) — NEM lett ebben a körben
+lefejlesztve, csak feljegyezve.
+
+## 27. Réteges kontír-szabály felépítés — `MappingRule.amountSignPattern` (2026.09.18-i kiegészítés)
+
+**Előzmény, élő hiba (2026-4369, végszámla):** a 24. fejezetben leírt
+előjel-alapú előleg-felülbírálás (`enableAdvanceSignOverride`) csak a
+NEGATÍV (előleg-visszavonó) tételekre ad kényszerített kontírt. A
+számla POZITÍV (ténylegesen kiszámlázott szolgáltatás) tétele a normál,
+termékalapú szabályillesztésre támaszkodik — ez éles tesztnél rossz
+kontírt (`453`, előleg) adott a helyes árbevétel-kontír (`9`) helyett,
+mert egy KORÁBBAN, kizárólag előleg-visszavonásokból TANULT szabály
+(`learned_invoiceanalytics`, terméknév-minta `"TSMT II képzés 2026 -
+tandíj"`) — mivel a mintaillesztés részleges (substring) egyezésű —
+ráillett a hosszabb, "... tandíj részlet" nevű negatív tételekre IS és
+a rövidebb, azonos nevű pozitív tételre IS, mindkettőre ugyanazt (a
+csak előlegre igaz) kontírt javasolva.
+
+**Miért nem jó egy globális, kontextusfüggetlen előjel-szabály:** könyvelői
+korrekció (2026.09.18) — egy sztornó számlán MEGFORDULNAK az előjelek, de
+a helyes kontír ott NEM az (megfordult) előjelből, hanem az EREDETI
+számla azonos tételének öröklött kontírjából adódik (ld. 24. fejezet,
+`resolveInheritedLineMapping`). Egy vak "pozitív → X" globális szabály
+tehát pont egy sztornón adna rossz eredményt.
+
+**A végleges, réteges modell** (könyvelői megfogalmazás: "vannak
+generális szabályok... ezek adják az elsődleges szabályt, de a normál
+szabályok is lefuthatnak"):
+
+1. **1. réteg — kontextus/szerep-szabályok** (bizonylattípus + kapcsolat
+   alapján, EGYMÁST KIZÁRÓ ágak, elsőbbséggel futnak):
+   - sztornó/helyesbítő + egyértelmű eredeti párosítás → öröklés
+     (`resolveInheritedLineMapping`, 24. fejezet),
+   - végszámla, előleg-elszámolással kapcsolatos tétel (megjegyzés-
+     hivatkozás VAGY előjel) → elsődleges előleg főkönyvi szám
+     (`suggestMappingForLine` "előleg-felülbírálás" szakasza, 24.
+     fejezet),
+   - egyik sem → nincs kényszerített döntés, 2. réteg.
+2. **2. réteg — normál, tartalmi szabályillesztés** (`MappingRule`,
+   `computeStandardSuggestion`): egy szabályon belül ÉS-kapcsolat a
+   feltételek között (partner, termék, megjegyzés, bizonylattípus, áfa,
+   és MOST már opcionálisan az összeg előjele is), egy mezőn belül VAGY
+   a `|`-lal felsorolt alternatívák között. A legspecifikusabb (legtöbb
+   egyidejűleg teljesülő feltételű) szabály nyer.
+
+**Új mező: `MappingRule.amountSignPattern`** (`"positive" | "negative" |
+null`) — a 2. réteg egy ÚJ, opcionális ÉS-feltétele, ugyanúgy, mint a
+`documentTypePattern`/`vatPattern`. Ezzel egy termékre felvehető egy
+SZŰKEBB, előjel-specifikus (kézi) szabály, ami — eggyel több feltétele
+lévén — specifikusabb, tehát megnyeri az illesztést egy azonos
+terméknevű, előjel nélküli (esetleg szennyezett tanult) szabállyal
+szemben.
+
+**Beépített védelem a sztornó-eset ellen**
+(`AMOUNT_SIGN_PATTERN_EXCLUDED_DOCUMENT_TYPES` a
+`mappingRuleEngine.ts`-ben): `matchRuleAgainstContext` a
+`cancellation`/`receipt_cancellation`/`modification` bizonylattípuson az
+`amountSignPattern` feltételt SOHA nem értékeli ki (a szabály ott sosem
+nyerhet) — ez akkor is védelmet ad, ha az 1. réteg öröklése bizonytalan
+egyezés miatt (több kapcsolódó bizonylat, vagy az eredeti tétel még nincs
+jóváhagyva) visszaesik a 2. rétegre: ott is a sima (előjel nélküli)
+szabályok versenyeznek, egy előjel-scope-olt szabály nem tud tévesen
+beleszólni.
+
+**Validáció:** az előjel-feltétel ÖNMAGÁBAN (más feltétel nélkül) nem
+engedélyezett — API-szinten (`src/app/api/companies/[companyId]/rules/
+route.ts` és `[ruleId]/route.ts`) és a szerkesztő felületen egyaránt
+kikényszerítve, hogy egy ilyen szabály ne legyen túl tág (ne illeszkedjen
+"minden pozitív/negatív sorra").
+
+**UI:** a Kontír/áfa szabályok oldal "Új kézi szabály" formja és a
+szabály-szerkesztő modal (`RulesEditor.tsx`) egyaránt kapott egy
+"Előjel-feltétel" legördülőt ("— nincs —"/"Csak pozitív"/"Csak
+negatív"), a táblázat egy új "Előjel-feltétel" oszloppal jelzi a
+beállítást.
+
+**Azonnali alkalmazás a konkrét esetre:** a deploy után felvett kézi
+szabály — termék: „TSMT II képzés 2026 - tandíj”, előjel: pozitív →
+árbevétel kontír `9` — a jelenlegi szennyezett tanult szabálynál
+specifikusabb, tehát attól kezdve helyesen kontírozza a hasonló
+végszámlák pozitív, ténylegesen kiszámlázott szolgáltatás-tételeit.
+
+**Migráció:** `20260918085947_mapping_rule_amount_sign_pattern` — egyetlen
+opcionális oszlop hozzáadása (`amountSignPattern TEXT`), nem
+destruktív, helyi Postgres-en validálva (`prisma migrate diff` "No
+difference detected").

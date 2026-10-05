@@ -13,10 +13,15 @@ interface InvoiceNumberGapGroup {
 
 export default function SyncControls({ companyId, canSync }: { companyId: string; canSync: boolean }) {
   const router = useRouter();
-  const [submitting, setSubmitting] = useState<"sync" | "recompute" | "gaps" | "fillgaps" | null>(null);
+  const [submitting, setSubmitting] = useState<"sync" | "recompute" | "gaps" | "fillgaps" | "imareconcile" | null>(
+    null
+  );
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [gapGroups, setGapGroups] = useState<InvoiceNumberGapGroup[] | null>(null);
+  const [imaResetInvoices, setImaResetInvoices] = useState<{ invoiceId: string; billingoDocumentNumber: string }[] | null>(
+    null
+  );
 
   async function runSync() {
     setSubmitting("sync");
@@ -154,6 +159,31 @@ export default function SyncControls({ companyId, canSync }: { companyId: string
     }
   }
 
+  async function runImaReconcile() {
+    setSubmitting("imareconcile");
+    setError(null);
+    setMessage(null);
+    setImaResetInvoices(null);
+    try {
+      // Egyetlen kéréssel fut (nem csomagolt/folytatható) — ld.
+      // reconcile-ima-booked/route.ts doksztringje.
+      const res = await fetch(`/api/companies/${companyId}/reconcile-ima-booked`, { method: "POST" });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error ?? `Sikertelen ellenőrzés (${res.status})`);
+      setImaResetInvoices(body.reset);
+      setMessage(
+        body.reset.length > 0
+          ? `${body.checked} könyvelt számla ellenőrizve, ${body.reset.length} nem található IMA-ban — visszaállítva "jóváhagyva" állapotra (részletek lent).`
+          : `${body.checked} könyvelt számla ellenőrizve, mindegyik megvan IMA-ban.`
+      );
+      router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Ismeretlen hiba történt.");
+    } finally {
+      setSubmitting(null);
+    }
+  }
+
   return (
     <div className="card stack">
       <div className="cluster">
@@ -193,6 +223,15 @@ export default function SyncControls({ companyId, canSync }: { companyId: string
             "Hiányzó számlák lekérése Billingo-ból"
           )}
         </button>
+        <button className="btn" onClick={runImaReconcile} disabled={submitting !== null}>
+          {submitting === "imareconcile" ? (
+            <>
+              <Spinner /> Egyeztetés…
+            </>
+          ) : (
+            "Könyvelt számlák egyeztetése IMA-val"
+          )}
+        </button>
         <span className="muted text-sm">
           Ha új szabályt tanultál/vettél fel, a "Javaslatok újraszámolása" futtatja le a még nem
           jóváhagyott számlákra — szinkron nélkül, gyorsan.
@@ -213,6 +252,22 @@ export default function SyncControls({ companyId, canSync }: { companyId: string
               <li key={g.prefix} className="text-sm">
                 <strong>„{g.prefix}”</strong> ({g.minNumber}–{g.maxNumber}): hiányzik{" "}
                 {g.missingNumbers.map((n) => `${g.prefix}${n}`).join(", ")}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {imaResetInvoices && imaResetInvoices.length > 0 && (
+        <div className="stack" style={{ gap: "0.25rem" }}>
+          <p className="text-sm muted" style={{ margin: 0 }}>
+            Ezek a számlák helyileg "könyvelt" állapotúak voltak, de IMA-ban nem találhatók (pl.
+            IMA-oldalon törölve lettek) — most "jóváhagyva" állapotra álltak vissza, a Számlák
+            oldalról újra beküldhetők IMA-nak:
+          </p>
+          <ul style={{ margin: 0, paddingLeft: "1.25rem" }}>
+            {imaResetInvoices.map((inv) => (
+              <li key={inv.invoiceId} className="text-sm">
+                {inv.billingoDocumentNumber}
               </li>
             ))}
           </ul>
