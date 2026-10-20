@@ -1,0 +1,639 @@
+// Ügyvédi előfizetéses platform – adatmodell VÁZLAT (v0.1)
+// Cél: PostgreSQL (Cloud SQL) + pgvector a tudástár kereséséhez.
+// Minden "TODO(kérdés)" jelölés nyitott üzleti/jogi kérdésre utal (lásd ../docs/vazlat.md).
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector, pgcrypto]
+}
+
+// ─────────────────────────── Enumok ───────────────────────────
+
+enum UserRole {
+  CLIENT        // ügyfél
+  LAWYER        // ügyvéd (admin)
+  STAFF         // asszisztens / jogi előadó (korlátozott admin)
+  SUPERADMIN    // üzemeltető
+}
+
+enum Practice {            // a 4 szolgáltatási terület
+  TAX_PROCEDURE            // adóhatósági eljárás
+  ESTATE                   // vagyontervezés, hagyaték
+  CONTRACT                 // szerződések
+  TAX_ADVISORY             // adótanácsadás
+}
+
+enum ServiceMode {
+  SELF_SERVICE             // szerződés-generálás
+  KNOWLEDGE_CHAT           // tudástár + chat
+  INTAKE_QUOTE             // feladatgyűjtés + árajánlat
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  EXPIRED
+}
+enum BillingInterval {
+  MONTH
+  YEAR
+}
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum TemplateStatus {
+  DRAFT
+  IN_REVIEW
+  PUBLISHED
+  ARCHIVED
+}
+enum VariableType {
+  TEXT
+  LONG_TEXT
+  NUMBER
+  MONEY
+  DATE
+  BOOLEAN
+  SELECT
+  MULTISELECT
+  PARTY
+  ADDRESS
+  TAX_ID
+}
+
+enum DocumentStatus {
+  DRAFT
+  GENERATED
+  SENT_TO_LAWYER
+  LAWYER_APPROVED
+  SIGNED
+  ARCHIVED
+}
+enum ReviewStatus {
+  QUEUED
+  RUNNING
+  DONE
+  FAILED
+}
+enum Severity {
+  INFO
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum CaseStatus {
+  NEW
+  INTAKE
+  QUOTED
+  ACCEPTED
+  IN_PROGRESS
+  WAITING_CLIENT
+  DONE
+  REJECTED
+  CANCELED
+}
+enum QuoteStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  DECLINED
+  EXPIRED
+}
+enum TaskStatus {
+  OPEN
+  IN_PROGRESS
+  DONE
+  CANCELED
+}
+
+enum LegalSourceType {
+  JOGSZABALY
+  KORMANYRENDELET
+  NAV_TAJEKOZTATO
+  KUR_HATAROZAT
+  BIROSAGI_GYAKORLAT
+  EGYEB
+}
+enum ChatRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+enum FileKind {
+  UPLOAD
+  GENERATED_DOCX
+  GENERATED_PDF
+  SIGNED_PDF
+  ATTACHMENT
+}
+
+// ─────────────────────────── Felhasználók ───────────────────────────
+
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  emailVerified DateTime?
+  passwordHash  String?              // vagy csak OIDC/magic link (Identity Platform)
+  role          UserRole @default(CLIENT)
+  fullName      String
+  phone         String?
+  locale        String   @default("hu")
+  isActive      Boolean  @default(true)
+  twoFactorOn   Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  clientProfile ClientProfile?
+  memberships   OrgMember[]
+  subscriptions Subscription[]
+  documents     ContractDocument[]
+  cases         Case[]            @relation("CaseClient")
+  assignedCases Case[]            @relation("CaseLawyer")
+  chatThreads   ChatThread[]
+  consents      Consent[]
+  auditLogs     AuditLog[]
+  files         File[]
+}
+
+model ClientProfile {
+  userId        String  @id
+  user          User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // természetes személy adatai – érzékeny, mező-szintű titkosítás javasolt (KMS)
+  birthName     String?
+  birthPlace    String?
+  birthDate     DateTime?
+  motherName    String?
+  taxId         String?            // adóazonosító jel (titkosítva)
+  idDocNumber   String?
+  zip           String?
+  city          String?
+  addressLine   String?
+  billingName   String?
+  billingTaxNo  String?            // számlázási adószám
+  billingAddress String?
+  isCompanyClient Boolean @default(false)
+}
+
+model Organization {            // cég / egyéni vállalkozó ügyfél
+  id         String @id @default(cuid())
+  name       String
+  taxNumber  String? @unique
+  regNumber  String?              // cégjegyzékszám
+  zip        String?
+  city       String?
+  addressLine String?
+  members    OrgMember[]
+  cases      Case[]
+  createdAt  DateTime @default(now())
+}
+
+model OrgMember {
+  orgId  String
+  userId String
+  title  String?                 // pl. ügyvezető
+  org    Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user   User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@id([orgId, userId])
+}
+
+// ─────────────────────────── Előfizetés ───────────────────────────
+
+model Plan {
+  id          String  @id @default(cuid())
+  code        String  @unique          // pl. "starter", "pro"
+  name        String
+  description String?
+  interval    BillingInterval
+  priceHuf    Int                      // bruttó, Ft
+  isActive    Boolean @default(true)
+  sortOrder   Int     @default(0)
+  entitlements PlanEntitlement[]
+  subscriptions Subscription[]
+}
+
+// Mit tartalmaz a csomag: területenként, keret-alapon.
+model PlanEntitlement {
+  id         String   @id @default(cuid())
+  planId     String
+  plan       Plan     @relation(fields: [planId], references: [id], onDelete: Cascade)
+  practice   Practice?
+  key        String                    // pl. "contracts_per_month", "ai_review_per_month", "chat_messages_per_month"
+  limitValue Int?                      // null = korlátlan
+  @@unique([planId, key])
+}
+
+model Subscription {
+  id                String   @id @default(cuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id])
+  planId            String
+  plan              Plan     @relation(fields: [planId], references: [id])
+  status            SubscriptionStatus
+  currentPeriodStart DateTime
+  currentPeriodEnd   DateTime
+  cancelAtPeriodEnd Boolean  @default(false)
+  providerCustomerId String?           // TODO(kérdés): Stripe / SimplePay / Barion
+  providerSubId     String?
+  createdAt         DateTime @default(now())
+  payments          Payment[]
+  usage             UsageCounter[]
+  @@index([userId, status])
+}
+
+model Payment {
+  id             String   @id @default(cuid())
+  subscriptionId String?
+  subscription   Subscription? @relation(fields: [subscriptionId], references: [id])
+  caseId         String?                // árajánlat-elfogadás utáni egyszeri díj
+  case           Case?    @relation(fields: [caseId], references: [id])
+  amountHuf      Int
+  status         PaymentStatus
+  providerRef    String?
+  invoiceNumber  String?                // Billingo / Számlázz.hu számla
+  paidAt         DateTime?
+  createdAt      DateTime @default(now())
+}
+
+model UsageCounter {                      // keretfigyelés (AI, generálás, chat)
+  id             String   @id @default(cuid())
+  subscriptionId String
+  subscription   Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  key            String
+  periodStart    DateTime
+  used           Int      @default(0)
+  @@unique([subscriptionId, key, periodStart])
+}
+
+// ─────────────────────────── Szerződéssablonok (admin) ───────────────────────────
+
+model TemplateCategory {
+  id        String  @id @default(cuid())
+  practice  Practice
+  slug      String  @unique
+  name      String                       // pl. "Adásvétel", "Megbízás", "Végrendelet"
+  sortOrder Int     @default(0)
+  templates ContractTemplate[]
+}
+
+model ContractTemplate {
+  id          String   @id @default(cuid())
+  categoryId  String
+  category    TemplateCategory @relation(fields: [categoryId], references: [id])
+  slug        String   @unique
+  title       String
+  summary     String                       // laikus nyelven: mire jó?
+  legalBasis  String?                      // pl. "Ptk. 6:215. §"
+  language    String   @default("hu")
+  requiresLawyerCountersign Boolean @default(false) // pl. ingatlan-adásvétel, végrendelet
+  minPlanCode String?                       // csomag-korlát
+  status      TemplateStatus @default(DRAFT)
+  currentVersionId String? @unique
+  currentVersion TemplateVersion? @relation("CurrentVersion", fields: [currentVersionId], references: [id])
+  versions    TemplateVersion[]            @relation("AllVersions")
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// Verziózott sablon: a már generált dokumentum mindig a saját verziójára mutat.
+model TemplateVersion {
+  id          String   @id @default(cuid())
+  templateId  String
+  template    ContractTemplate @relation("AllVersions", fields: [templateId], references: [id], onDelete: Cascade)
+  asCurrentOf ContractTemplate? @relation("CurrentVersion")
+  version     Int
+  bodyHtml    String                       // törzs {{változó}} és {{#if}} blokkokkal (Handlebars/Liquid)
+  sourceDocxFileId String?                 // az ügyvéd által feltöltött eredeti .docx
+  changelog   String?
+  lawEffectiveFrom DateTime?               // melyik jogszabályi állapothoz készült
+  publishedAt DateTime?
+  approvedById String?                     // ügyvédi jóváhagyás
+  createdAt   DateTime @default(now())
+
+  variables   TemplateVariable[]
+  clauses     TemplateClause[]
+  documents   ContractDocument[]
+  @@unique([templateId, version])
+}
+
+// A kérdőív (wizard) mezői.
+model TemplateVariable {
+  id          String   @id @default(cuid())
+  versionId   String
+  version     TemplateVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  key         String                       // a törzsben használt név
+  label       String
+  helpText    String?                      // "Mit jelent ez?" laikusoknak
+  type        VariableType
+  required    Boolean  @default(true)
+  options     Json?                        // SELECT opciók
+  validation  Json?                        // regex, min/max
+  showIf      Json?                        // feltételes megjelenítés
+  groupName   String?                      // wizard lépés
+  sortOrder   Int      @default(0)
+  @@unique([versionId, key])
+}
+
+// Opcionális záradék-könyvtár (kérdőív alapján be/ki kapcsolható).
+model TemplateClause {
+  id        String   @id @default(cuid())
+  versionId String
+  version   TemplateVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  key       String
+  title     String
+  bodyHtml  String
+  condition Json?
+  isDefault Boolean  @default(true)
+  @@unique([versionId, key])
+}
+
+// ─────────────────────────── Ügyfél-szerződések ───────────────────────────
+
+model ContractDocument {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  versionId   String
+  version     TemplateVersion @relation(fields: [versionId], references: [id])
+  title       String
+  status      DocumentStatus @default(DRAFT)
+  answers     Json                          // wizard-válaszok
+  enabledClauses String[]
+  renderedHtml String?
+  docxFileId  String?
+  pdfFileId   String?
+  signedFileId String?
+  lawyerNote  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  reviews     AiContractReview[]
+  @@index([userId, status])
+}
+
+// Gemini-alapú szerződés-felülvizsgálat (saját vagy feltöltött szerződés)
+model AiContractReview {
+  id          String   @id @default(cuid())
+  userId      String
+  documentId  String?
+  document    ContractDocument? @relation(fields: [documentId], references: [id])
+  sourceFileId String?                      // feltöltött idegen szerződés
+  status      ReviewStatus @default(QUEUED)
+  model       String                         // pl. "gemini-2.5-pro" – verzió naplózása
+  promptVersion String
+  summary     String?
+  riskScore   Int?
+  tokensIn    Int?
+  tokensOut   Int?
+  lawyerVerified Boolean @default(false)    // ügyvédi ellenőrzés után
+  lawyerComment  String?
+  createdAt   DateTime @default(now())
+  findings    ReviewFinding[]
+}
+
+model ReviewFinding {
+  id         String   @id @default(cuid())
+  reviewId   String
+  review     AiContractReview @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  severity   Severity
+  clauseRef  String?                         // hely a szövegben
+  quote      String?
+  issue      String
+  suggestion String?
+  legalBasis String?
+  sourceChunkId String?                      // tudástár-hivatkozás (RAG)
+}
+
+// ─────────────────────────── Tudástár + chat (adóhatósági eljárás, adótanácsadás) ───────────────────────────
+
+model LegalSource {                           // jogszabály / NAV-tájékoztató
+  id          String   @id @default(cuid())
+  type        LegalSourceType
+  title       String
+  citation    String?                         // pl. "2017. évi CL. tv. (Art.) 78. §"
+  url         String?                         // njt.hu, nav.gov.hu
+  effectiveFrom DateTime?
+  effectiveTo   DateTime?
+  fetchedAt   DateTime?
+  rawFileId   String?
+  articles    KnowledgeArticle[]
+  chunks      KnowledgeChunk[]
+}
+
+model KnowledgeArticle {                      // egyszerűsített, ügyvéd által jóváhagyott cikk
+  id          String   @id @default(cuid())
+  practice    Practice
+  slug        String   @unique
+  title       String
+  bodyMd      String
+  tags        String[]
+  status      TemplateStatus @default(DRAFT)
+  sourceId    String?
+  source      LegalSource? @relation(fields: [sourceId], references: [id])
+  reviewedById String?
+  reviewedAt  DateTime?
+  reviewDueAt DateTime?                       // jogszabály-változás miatti újraellenőrzés
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  chunks      KnowledgeChunk[]
+}
+
+model KnowledgeChunk {                        // RAG-egység
+  id         String   @id @default(cuid())
+  practice   Practice
+  articleId  String?
+  article    KnowledgeArticle? @relation(fields: [articleId], references: [id], onDelete: Cascade)
+  sourceId   String?
+  source     LegalSource? @relation(fields: [sourceId], references: [id])
+  content    String
+  embedding  Unsupported("vector(768)")?      // Vertex AI embedding
+  tokenCount Int?
+  @@index([practice])
+}
+
+model ChatThread {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  practice  Practice
+  caseId    String?
+  case      Case?    @relation(fields: [caseId], references: [id])
+  title     String?
+  escalated Boolean  @default(false)           // átadva ügyvédnek
+  createdAt DateTime @default(now())
+  messages  ChatMessage[]
+}
+
+model ChatMessage {
+  id        String   @id @default(cuid())
+  threadId  String
+  thread    ChatThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  role      ChatRole
+  content   String
+  model     String?
+  confidence Float?
+  feedback  Int?                                // +1 / -1
+  createdAt DateTime @default(now())
+  citations ChatCitation[]
+}
+
+model ChatCitation {
+  id        String   @id @default(cuid())
+  messageId String
+  message   ChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  chunkId   String
+  quote     String?
+}
+
+// ─────────────────────────── Ügyek (vagyontervezés/hagyaték, adóeljárás-támogatás, ajánlatkérés) ───────────────────────────
+
+// Az ügyvéd által szerkeszthető intake-űrlap (feladatgyűjtő).
+model IntakeForm {
+  id        String   @id @default(cuid())
+  practice  Practice
+  code      String   @unique                    // pl. "hagyatek-alap"
+  title     String
+  schema    Json                                // kérdések, feltételek
+  version   Int      @default(1)
+  isActive  Boolean  @default(true)
+  cases     Case[]
+}
+
+model Case {
+  id          String   @id @default(cuid())
+  number      String   @unique                  // pl. "2026/0042"
+  practice    Practice
+  clientId    String
+  client      User     @relation("CaseClient", fields: [clientId], references: [id])
+  orgId       String?
+  org         Organization? @relation(fields: [orgId], references: [id])
+  lawyerId    String?
+  lawyer      User?    @relation("CaseLawyer", fields: [lawyerId], references: [id])
+  title       String
+  status      CaseStatus @default(NEW)
+  intakeFormId String?
+  intakeForm  IntakeForm? @relation(fields: [intakeFormId], references: [id])
+  intakeAnswers Json?
+  deadline    DateTime?                          // pl. NAV határidő
+  authorityRef String?                           // NAV ügyszám
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  quotes      Quote[]
+  tasks       Task[]
+  files       File[]
+  payments    Payment[]
+  threads     ChatThread[]
+  notes       CaseNote[]
+  @@index([clientId, status])
+  @@index([lawyerId, status])
+}
+
+model Quote {
+  id         String   @id @default(cuid())
+  caseId     String
+  case       Case     @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  version    Int      @default(1)
+  status     QuoteStatus @default(DRAFT)
+  validUntil DateTime?
+  totalNetHuf Int
+  vatPercent Int      @default(27)
+  currency   String   @default("HUF")
+  terms      String?
+  pdfFileId  String?
+  sentAt     DateTime?
+  decidedAt  DateTime?
+  items      QuoteItem[]
+}
+
+model QuoteItem {
+  id        String @id @default(cuid())
+  quoteId   String
+  quote     Quote  @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  description String
+  quantity  Decimal @default(1)
+  unit      String  @default("db")              // db / óra / fix
+  unitNetHuf Int
+  sortOrder Int     @default(0)
+}
+
+model Task {
+  id         String   @id @default(cuid())
+  caseId     String
+  case       Case     @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  title      String
+  description String?
+  assignee   String?                            // user id (ügyvéd/ügyfél)
+  status     TaskStatus @default(OPEN)
+  dueAt      DateTime?
+  visibleToClient Boolean @default(true)
+  createdAt  DateTime @default(now())
+}
+
+model CaseNote {
+  id        String   @id @default(cuid())
+  caseId    String
+  case      Case     @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  authorId  String
+  body      String
+  internal  Boolean  @default(true)             // belső jegyzet vs. ügyfélnek látható
+  createdAt DateTime @default(now())
+}
+
+// ─────────────────────────── Fájlok, megfelelés ───────────────────────────
+
+model File {
+  id         String   @id @default(cuid())
+  ownerId    String
+  owner      User     @relation(fields: [ownerId], references: [id])
+  caseId     String?
+  case       Case?    @relation(fields: [caseId], references: [id])
+  kind       FileKind
+  bucket     String                              // GCS, CMEK titkosítás
+  objectKey  String
+  fileName   String
+  mimeType   String
+  sizeBytes  Int
+  sha256     String
+  virusScanned Boolean @default(false)
+  createdAt  DateTime @default(now())
+  deleteAfter DateTime?                           // megőrzési idő (ügyvédi: 5-10 év, TODO(kérdés))
+}
+
+model Consent {                                   // GDPR + AI-használat + ÁSZF
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  type      String                                // TERMS | PRIVACY | AI_PROCESSING | MARKETING
+  version   String
+  givenAt   DateTime @default(now())
+  ip        String?
+}
+
+model AuditLog {                                  // ki, mikor, mihez fért hozzá (titoktartás!)
+  id        String   @id @default(cuid())
+  actorId   String?
+  actor     User?    @relation(fields: [actorId], references: [id])
+  action    String                                // pl. "document.view"
+  entity    String
+  entityId  String
+  meta      Json?
+  ip        String?
+  createdAt DateTime @default(now())
+  @@index([entity, entityId])
+  @@index([actorId, createdAt])
+}
