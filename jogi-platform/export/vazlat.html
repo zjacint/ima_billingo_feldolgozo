@@ -31,9 +31,9 @@ ul{margin:3pt 0;padding-left:14pt}
 </style></head><body>
 
 <div class="cover"><h1>Ügyvédi előfizetéses platform</h1>
-<p>Váz, folyamatok és képernyőtervek – vázlat v0.1</p>
+<p>Váz, folyamatok és képernyőtervek – vázlat v0.2 (1. kör válaszaival)</p>
 <p>Magyar joganyagra épülő, ügyvéd által felügyelt webalkalmazás.<br>Szerződések · Adóhatósági eljárás · Adótanácsadás · Vagyontervezés és hagyaték</p>
-<p style="margin-top:30mm;font-size:9pt">Technológia: Next.js · Prisma · PostgreSQL (pgvector) · Google Cloud (Cloud Run, Vertex AI Gemini)<br>Dátum: 2026-10-20</p></div>
+<p style="margin-top:30mm;font-size:9pt">Technológia: Next.js · Prisma · PostgreSQL (pgvector) · Google Cloud (Cloud Run, Vertex AI Gemini)<br>Dátum: 2026-11-02</p></div>
 
 <div class="pb"><h2>1. A szolgáltatás áttekintése</h2>
 <table><tr><th>Terület</th><th>Mód</th><th>Ügyfél</th><th>Ügyvéd (admin)</th></tr>
@@ -97,5 +97,27 @@ ul{margin:3pt 0;padding-left:14pt}
 <div class="card"><b>Admin</b><ul><li>/admin – irányítópult</li><li>/admin/sablonok</li><li>/admin/tudastar</li><li>/admin/ugyek</li><li>/admin/ai-felulvizsgalatok</li><li>/admin/felhasznalok</li><li>/admin/csomagok</li><li>/admin/naplok</li></ul></div></div>
 <h3>UX alapelvek</h3><ul><li>Laikus nyelv, „Mit jelent?" súgó minden jogi fogalomnál.</li><li>Bizalom: ügyvéd neve, jóváhagyási dátum, jogszabályi állapot dátuma.</li><li>AI-kimeneten mindig: „Tájékoztató jellegű, nem jogi tanács" + forrás + ügyvédi ellenőrzés kérése.</li><li>Mobil-first, WCAG 2.1 AA, piszkozat-mentés minden lépésnél.</li></ul>
 <h3>Ütemezés (javaslat)</h3><table><tr><th>Szakasz</th><th>Idő</th></tr><tr><td>Alap: auth, DB, CI/CD, Terraform</td><td>2–3 hét</td></tr><tr><td>Szerződés-modul</td><td>4 hét</td></tr><tr><td>Előfizetés és fizetés</td><td>2 hét</td></tr><tr><td>Tudástár + chat (RAG)</td><td>3–4 hét</td></tr><tr><td>Gemini szerződés-review</td><td>2 hét</td></tr><tr><td>Ügy- és árajánlat-modul</td><td>3 hét</td></tr><tr><td>Biztonsági audit, pilot</td><td>2 hét</td></tr></table>
+</div>
+
+<div class="pb"><h2>8. Frissítés az 1. kör válaszai alapján</h2>
+<h3>8.1 Csomagok és árak (nettó, + 27% ÁFA)</h3>
+<table><tr><th>Csomag</th><th>Tartalom</th><th>Ár</th></tr>
+<tr><td>Egyedi dokumentum (magánszemély / cég előfizetés nélkül)</td><td>1 szerződés generálása, DOCX/PDF</td><td>5 900 Ft/db</td></tr>
+<tr><td>Cég – Alap (1 felhasználó)</td><td>Korlátlan iratminta-letöltés, 5 generálás/hó, 2 AI-ellenőrzés/hó</td><td>9 900 Ft/hó</td></tr>
+<tr><td>Cég – Emelt (2 felhasználó)</td><td>Mint az Alap, de 5 AI-ellenőrzés/hó, tudástár, havi 1 ügyvédi ellenőrzés vagy 30 perc konzultáció</td><td>29 900 Ft/hó</td></tr>
+<tr><td>Keret felett</td><td>Generálás 5 900 Ft/db, AI-ellenőrzés 2 900 Ft/db</td><td></td></tr>
+<tr><td>Ügyvédi kiegészítők</td><td>Szerződés-ellenőrzés 9 900 Ft/db, konzultáció 9 900 Ft/30 perc</td><td></td></tr>
+<tr><td>Ellenjegyzéses ügyletek</td><td>Egyedi árajánlat, előfizetői kedvezménnyel</td><td>árajánlat</td></tr></table>
+<p class="note">12 hónapos időszak; idő előtti felmondásnál a hátralévő havi díjak egy összegben fizetendők.</p>
+<h3>8.2 Új és módosított folyamatok</h3>
+<h3>8.2.1 Egyedi vásárlás (vendég, regisztráció nélkül)</h3><div class="flow"><div class="step">Sablon kiválasztása</div><div class="arr">→</div><div class="step">Kérdőív kitöltése</div><div class="arr">→</div><div class="step">ÁSZF, elállás, AI-hozzájárulás pipák</div><div class="arr">→</div><div class="step hl">Kártya-foglalás</div><div class="arr">→</div><div class="step hl">Dokumentum legenerálása</div><div class="arr">→</div><div class="step hl">Azonnali megterhelés + számla</div><div class="arr">→</div><div class="step">Letöltőlink e-mailben (7 nap)</div><div class="arr">→</div><div class="step">Automatikus törlés</div></div>
+<h3>8.2.2 Cég – előfizetés és felhasználás</h3><div class="flow"><div class="step">Cég regisztráció</div><div class="arr">→</div><div class="step">Csomag + kártya</div><div class="arr">→</div><div class="step">Számlázás (Billingo)</div><div class="arr">→</div><div class="step hl">Keret figyelése (5 gen., AI)</div><div class="arr">→</div><div class="step hl">Keret felett: egyedi díj + megterhelés</div><div class="arr">→</div><div class="step">12 hónap után: megújulás</div></div>
+<h3>8.2.3 Idő előtti felmondás</h3><div class="flow"><div class="step">Felmondás kérése</div><div class="arr">→</div><div class="step">Hátralévő hónapok kiszámítása</div><div class="arr">→</div><div class="step hl">Egyösszegű díj számlázása</div><div class="arr">→</div><div class="step">Fiók lezárása a hónap végén</div></div>
+<h3>8.2.4 Ügyvédi kiegészítő megrendelése</h3><div class="flow"><div class="step">Dokumentum vagy időpont választása</div><div class="arr">→</div><div class="step">Keret (Emelt) vagy fizetés (9 900 Ft)</div><div class="arr">→</div><div class="step hl">Ügyvédi feladat az adminban</div><div class="arr">→</div><div class="step">Ügyvédi válasz / konzultáció</div><div class="arr">→</div><div class="step">Lezárás</div></div>
+<h3>8.2.5 Ellenjegyzéses ügy (ingatlan, cégalapítás, végrendelet)</h3><div class="flow"><div class="step">Ajánlatkérő űrlap</div><div class="arr">→</div><div class="step">Ügy létrejön</div><div class="arr">→</div><div class="step hl">Ügyfél-azonosítás (Pmt.): táv vagy személyes</div><div class="arr">→</div><div class="step hl">Árajánlat (előfizetői kedvezmény)</div><div class="arr">→</div><div class="step">Elfogadás</div><div class="arr">→</div><div class="step">Távellenjegyzés / helyszíni</div></div>
+<h3>8.2.6 Adatok törlése</h3><div class="flow"><div class="step">Letöltés vagy 7. nap</div><div class="arr">→</div><div class="step hl">Tartalom és fájlok törlése</div><div class="arr">→</div><div class="step">Számla- és fizetési adat marad</div><div class="arr">→</div><div class="step">Napló: kiürítés rögzítve</div></div>
+<h3>8.3 Új képernyők</h3>
+<div class="wf"><div class="bar"><i></i><i></i><i></i><span>Vendég-pénztár (egyedi dokumentum)</span></div><div class="wfb"><b>Lakásbérleti szerződés</b> – 5 900 Ft + ÁFA (magánszemélynek: 7 493 Ft)<div class="inp">E-mail (ide küldjük a letöltőlinket)</div><div class="inp">Kártyaszám · lejárat · CVC (a foglalás a generálásig tart)</div>▢ Elfogadom az ÁSZF-et és az adatkezelést<br>▢ Hozzájárulok az AI-ellenőrzéshez (opcionális)<br>▢ Tudomásul veszem, hogy a letöltéssel elveszítem az elállási jogot<br><span class="btn">Legenerálás és fizetés</span><br><small>A dokumentumot és az adataidat 7 nap után automatikusan töröljük.</small></div></div>
+<div class="wf"><div class="bar"><i></i><i></i><i></i><span>Cégfiók – csomag és keret</span></div><div class="wfb"><b>Cég – Emelt</b> · 29 900 Ft + ÁFA/hó · időszak vége: 2027.11.01.<div class="grid g3"><div class="card"><b>Generálás</b><br>3 / 5 felhasznált</div><div class="card"><b>AI-ellenőrzés</b><br>5 / 5 – a következő 2 900 Ft + ÁFA</div><div class="card"><b>Ügyvédi kiegészítő</b><br>1 / 1 választható: ellenőrzés vagy konzultáció</div></div><br>Felhasználók: Anna K. (tulajdonos), Béla N.<br><span class="btn o">Ügyvédi ellenőrzést kérek (9 900 Ft)</span><span class="btn o">Felmondás</span></div></div>
 </div>
 </body></html>

@@ -1,4 +1,4 @@
-# Ügyvédi előfizetéses platform – vázlat v0.1
+# Ügyvédi előfizetéses platform – vázlat v0.2
 
 Magyar joganyagra épülő, ügyvéd által felügyelt, előfizetéses webalkalmazás.
 Mintaként szolgáló termékek (LawDepot, online végrendelet-készítők) tanulsága: önkiszolgáló
